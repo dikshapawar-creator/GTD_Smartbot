@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, ConfigDict
+from pydantic import BaseModel, EmailStr, ConfigDict, Field
 from typing import Optional, List
 from uuid import UUID
 from datetime import datetime
@@ -16,9 +16,34 @@ class ChatState(str, Enum):
     REQUIREMENT = "REQUIREMENT"
     COMPLETE = "COMPLETE"
 
-class LeadBase(BaseModel):
+class ResponseType(str, Enum):
+    MESSAGE = "MESSAGE"
+    CTA = "CTA"
+
+class SessionInitResponse(BaseModel):
+    session_token: str
+    message: str
+    state: ChatState
+
+class ChatMessageRequest(BaseModel):
+    # sessionId removed from body for security
+    message: str
+
+class ChatMessageResponse(BaseModel):
+    # Backward compatibility: returning sessionId
+    sessionId: str
+    message: str
+    state: ChatState
+    type: ResponseType = ResponseType.MESSAGE
+    cta_label: Optional[str] = None
+    action: Optional[str] = None
+    intent: Optional[str] = None # For visibility in Swagger/Debug
+    has_greeted: Optional[bool] = None
+
+class LeadResponse(BaseModel):
+    id: UUID
     name: Optional[str] = None
-    email: Optional[EmailStr] = None
+    email: Optional[str] = None
     company: Optional[str] = None
     phone: Optional[str] = None
     trade_type: Optional[str] = None
@@ -26,34 +51,20 @@ class LeadBase(BaseModel):
     product: Optional[str] = None
     requirement_type: Optional[str] = None
     status: Optional[str] = "NEW"
-
-class LeadCreate(LeadBase):
-    pass
-
-class LeadResponse(LeadBase):
-    id: UUID
     created_at: datetime
-    # Pydantic v2 style for from_orm
     model_config = ConfigDict(from_attributes=True)
 
+class LeadSubmitRequest(BaseModel):
+    full_name: str
+    company_name: str
+    website: Optional[str] = None
+    business_email: EmailStr
+    contact_number: str
+
 class ConversationResponse(BaseModel):
-    id: UUID
-    lead_id: UUID
+    id: int # Changed to int for BIGINT PK compatibility
+    lead_id: str
     message: str
     sender: str
     timestamp: datetime
     model_config = ConfigDict(from_attributes=True)
-
-class ChatStartResponse(BaseModel):
-    sessionId: UUID
-    message: str
-    state: ChatState
-
-class ChatMessageRequest(BaseModel):
-    sessionId: UUID
-    message: str
-
-class ChatMessageResponse(BaseModel):
-    sessionId: UUID
-    message: str
-    state: ChatState

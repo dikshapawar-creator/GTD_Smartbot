@@ -20,6 +20,9 @@ def init_db():
         # Import models here to ensure they are registered with Base.metadata
         from app.models.lead import Lead
         from app.models.conversation import Conversation
+        from app.models.chat_session import ChatSession
+        from app.models.chat_message import ChatMessage
+        from app.models.intent_config import IntentConfig
         
         logger.info("Connecting to database and creating tables...")
         Base.metadata.create_all(bind=engine)

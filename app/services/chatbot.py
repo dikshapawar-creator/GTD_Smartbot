@@ -1,10 +1,16 @@
+"""
+ChatbotService — Refactored to use SQL-based sessions.
+Removes in-memory dict and delegates storage to SessionService.
+"""
 import logging
 from sqlalchemy.orm import Session
-from uuid import UUID, uuid4
+from uuid import UUID
 from typing import Dict, Any, Optional
+
 from app.schemas.chatbot import ChatState
 from app.models.lead import Lead
-from app.models.conversation import Conversation
+from app.models.chat_session import ChatSession
+from app.services import session_service
 
 logger = logging.getLogger(__name__)
 
@@ -21,51 +27,28 @@ STATE_QUESTIONS = {
     ChatState.COMPLETE: "Is there anything else I can help you with?"
 }
 
-# In-memory session storage (consider Redis for production persistent state)
-session_storage: Dict[UUID, Dict[str, Any]] = {}
-
 class ChatbotService:
     @staticmethod
-    def start_chat(db: Session) -> Dict[str, Any]:
-        session_id = uuid4()
-        logger.info(f"Starting new chat session: {session_id}")
-        
-        lead = Lead(id=session_id, status="IN_PROGRESS")
-        db.add(lead)
-        db.commit()
-        db.refresh(lead)
+    def handle_message(db: Session, chat_session: ChatSession, user_message: str) -> Dict[str, Any]:
+        """
+        Handles a message using the provided DB session object.
+        Replaces lead logic while keeping backward compatibility with the 'leads' table.
+        """
+        current_state = chat_session.chat_state
+        session_id = chat_session.session_id
 
-        session_storage[session_id] = {
-            "state": ChatState.TRADE_TYPE,
-            "lead_id": session_id
-        }
+        # 1. Save user message to persistent SQL messages table
+        session_service.save_message(db, chat_session, user_message, "user")
 
-        message = STATE_QUESTIONS[ChatState.START]
-        ChatbotService.save_message(db, session_id, message, "bot")
-
-        return {
-            "sessionId": session_id,
-            "message": message,
-            "state": ChatState.START
-        }
-
-    @staticmethod
-    def handle_message(db: Session, session_id: UUID, user_message: str) -> Dict[str, Any]:
-        if session_id not in session_storage:
-            logger.warning(f"Invalid session ID attempt: {session_id}")
-            return {"error": "Invalid session ID"}
-
-        current_session = session_storage[session_id]
-        current_state = current_session["state"]
-        lead_id = current_session["lead_id"]
-
-        ChatbotService.save_message(db, lead_id, user_message, "user")
-
-        lead = db.query(Lead).filter(Lead.id == lead_id).first()
+        # 2. Backward compatibility: Find or create lead tied to this session
+        lead = db.query(Lead).filter(Lead.id == chat_session.session_id).first()
         if not lead:
-             logger.error(f"Lead not found for session_id: {session_id}")
-             return {"error": "Lead not found"}
-        
+             # If no lead exists for this session yet, create one
+             lead = Lead(id=chat_session.session_id, status="IN_PROGRESS")
+             db.add(lead)
+             # Note: No need for separate Conversation save here as we use ChatMessage table now
+
+        # 3. Process State Machine
         next_state = current_state
         if current_state == ChatState.TRADE_TYPE:
             lead.trade_type = user_message
@@ -93,24 +76,14 @@ class ChatbotService:
             lead.status = "COMPLETE"
             next_state = ChatState.COMPLETE
 
-        db.commit()
-        session_storage[session_id]["state"] = next_state
+        # 4. Update state in DB session row
+        session_service.update_chat_state(db, chat_session, next_state)
         
+        # 5. Get bot response and save it
         bot_response = STATE_QUESTIONS[next_state]
-        ChatbotService.save_message(db, lead_id, bot_response, "bot")
+        session_service.save_message(db, chat_session, bot_response, "bot")
 
         return {
-            "sessionId": session_id,
             "message": bot_response,
             "state": next_state
         }
-
-    @staticmethod
-    def save_message(db: Session, lead_id: UUID, message: str, sender: str):
-        conversation = Conversation(
-            lead_id=lead_id,
-            message=message,
-            sender=sender
-        )
-        db.add(conversation)
-        db.commit()
