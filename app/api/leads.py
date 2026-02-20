@@ -1,73 +1,67 @@
-"""
-Leads API — Enterprise lead management and form submission.
-Handles secure lead capture with automated geolocation and source tracking.
-"""
+
+import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from typing import List
 from uuid import UUID
-from datetime import datetime
-import pytz
+from datetime import datetime, timezone
 
 from app.core.dependencies import get_db
 from app.models.lead import Lead
 from app.models.conversation import Conversation
 from app.schemas.chatbot import LeadResponse, ConversationResponse, LeadSubmitRequest
-from app.services import geo_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/leads", tags=["Leads Admin"])
 
-@router.post("/submit", summary="Submit enterprise lead form")
-def submit_lead(request: Request, lead_req: LeadSubmitRequest, db: Session = Depends(get_db)):
-    """
-    Submits an enterprise lead form. 
-    Maintains security by auto-resolving IP and Country on the backend.
-    """
-    # 1. Capture Client IP (Proxy-aware)
-    client_ip = geo_service.extract_client_ip(
-        forwarded_for=request.headers.get("X-Forwarded-For"),
-        real_ip=request.headers.get("X-Real-IP"),
-        remote_addr=request.client.host if request.client else "127.0.0.1"
-    )
-    
-    # 2. Lookup Geolocation
-    country, city, tz_name = geo_service.lookup_ip_geo(client_ip)
-    
-    # 3. Handle Timestamps
-    now_utc = datetime.utcnow()
-    try:
-        user_tz = pytz.timezone(tz_name or "UTC")
-        now_local = datetime.now(user_tz)
-    except Exception:
-        now_local = now_utc
 
-    # 4. Create Lead Record
-    # Note: Mapping business_email to email, company_name to company
+@router.post("/submit", summary="Submit chatbot lead form")
+def submit_lead(
+    lead_req: LeadSubmitRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Simplified Lead Submission.
+    Validates via Pydantic and checks for duplicate emails.
+    """
+    # ── 1. Duplicate email detection ────────────────────────────────────────
+    normalized_email = lead_req.business_email.strip().lower()
+    existing = db.query(Lead).filter(Lead.email == normalized_email).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="A lead with this email already exists.")
+
+    # ── 2. Create Lead record ───────────────────────────────────────────────
     new_lead = Lead(
-        name=lead_req.full_name,
-        email=lead_req.business_email,
-        company=lead_req.company_name,
-        phone=lead_req.contact_number,
-        # trade_type or product could be added from session if needed, 
-        # but here we focus on form submission
-        status="NEW",
-        created_at=now_utc  
+        name       = lead_req.full_name,
+        email      = normalized_email,
+        company    = lead_req.company_name,
+        website    = lead_req.website,
+        phone      = lead_req.contact_number,
+        status     = "NEW",
+        created_at = datetime.now(timezone.utc),
     )
-    # Adding extra metadata could require a separate table or extending Lead model
-    # For now, we reuse the existing Lead model fields
-    
-    db.add(new_lead)
-    db.commit()
-    db.refresh(new_lead)
+
+    try:
+        db.add(new_lead)
+        db.commit()
+        db.refresh(new_lead)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Duplicate lead detected.")
 
     return {
-        "success": True, 
-        "message": "Thank you. Our team will contact you shortly."
+        "success": True,
+        "message": "Thank you. Our team will contact you soon.",
+        "reference_id": str(new_lead.id),
     }
+
 
 @router.get("/", response_model=List[LeadResponse], summary="Get all leads")
 def get_leads(db: Session = Depends(get_db)):
-    return db.query(Lead).all()
+    return db.query(Lead).order_by(Lead.created_at.desc()).all()
+
 
 @router.get("/{id}", response_model=LeadResponse, summary="Get lead by ID")
 def get_lead(id: UUID, db: Session = Depends(get_db)):
@@ -76,6 +70,11 @@ def get_lead(id: UUID, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Lead not found")
     return lead
 
-@router.get("/{leadId}/conversations", response_model=List[ConversationResponse], summary="Get conversations for a lead")
+
+@router.get(
+    "/{leadId}/conversations",
+    response_model=List[ConversationResponse],
+    summary="Get conversations for a lead"
+)
 def get_conversations(leadId: UUID, db: Session = Depends(get_db)):
     return db.query(Conversation).filter(Conversation.lead_id == leadId).all()

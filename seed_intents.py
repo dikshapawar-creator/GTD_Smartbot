@@ -13,9 +13,14 @@ def seed_intents():
             greeting = IntentConfig(
                 intent_key="GREETING",
                 keywords=["hi", "hello", "hey", "hii", "heey", "hola", "good morning", "good afternoon", "good evening"],
-                response_text="Hello! How can I assist you with your trade requirements today?"
+                response_text="Welcome!\nAre you looking to import or export data?\nI’m here to assist you — please let me know how I can help.",
+                metadata_json={"cta_label": "Book Demo", "action": "OPEN_LEAD_FORM"}
             )
             db.add(greeting)
+        else:
+            greeting.response_text = "Welcome!\nAre you looking to import or export data?\nI’m here to assist you — please let me know how I can help."
+            greeting.metadata_json = {"cta_label": "Book Demo", "action": "OPEN_LEAD_FORM"}
+
 
         # 2. Sales/Demo Config
         sales = db.query(IntentConfig).filter(IntentConfig.intent_key == "SALES_DEMO").first()

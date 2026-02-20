@@ -7,14 +7,14 @@ class Settings(BaseSettings):
     DATABASE_URL: str
     SECRET_KEY: str = "your-secret-key-here"
     DEBUG: bool = True
+
+    # CORS — replace with your actual frontend URL in production
+    FRONTEND_ORIGIN: str = "http://localhost:3000"
+
+    # CORS — replace with your actual frontend URL in production
+    FRONTEND_ORIGIN: str = "http://localhost:3000"
+
     LOG_LEVEL: str = "INFO"
-
-    # Session management
-    SESSION_EXPIRY_MINUTES: int = 30
-    SESSION_COOKIE_NAME: str = "chat_session"
-
-    # IP Geolocation (ipapi.co — free tier, no key required)
-    IP_API_URL: str = "https://ipapi.co/{ip}/json/"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
