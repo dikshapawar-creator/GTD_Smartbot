@@ -1,0 +1,93 @@
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+from app.core.config import settings
+from app.core.dependencies import get_db
+from app.api.deps import get_current_user
+from app.schemas.auth import LoginRequest, Token, RefreshRequest, ForgotPasswordRequest, ResetPasswordRequest
+from app.schemas.auth_setup import AdminSetupRequest
+from app.schemas.user import UserResponse
+from app.services.auth_service import AuthService
+from app.models.auth import User
+
+router = APIRouter(prefix="/auth", tags=["Authentication"])
+
+@router.post("/setup-admin", response_model=UserResponse)
+def setup_admin(req: AdminSetupRequest, db: Session = Depends(get_db)):
+    """
+    ONE-TIME BOOTSTRAP: Create first tenant and administrator.
+    Only works if zero administrators exist in the entire database.
+    """
+    return AuthService.setup_admin(
+        db, req.email, req.password, req.tenant_name, req.setup_token
+    )
+
+@router.post("/login")
+def login(login_req: LoginRequest, db: Session = Depends(get_db)):
+    """
+    Authenticate user. Returns access_token + refresh_token.
+    
+    Enterprise Flow:
+    - Store access_token in memory (Redux/Context).
+    - Store refresh_token in localStorage.
+    - Use role/role_level to route to correct dashboard.
+    - Call POST /auth/refresh when access_token expires (after expires_in seconds).
+    """
+    user = AuthService.authenticate_user(db, login_req.email, login_req.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    access_token, refresh_token = AuthService.create_session(db, user)
+    expires_in = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60  # convert to seconds
+    
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "expires_in": expires_in,          # seconds until access_token expires
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "role": user.role.name,         # "administrator" / "admin" / "sales"
+            "role_level": user.role.level,  # 3 / 2 / 1 — for frontend routing
+            "tenant_id": user.tenant_id,
+        }
+    }
+
+@router.post("/refresh")
+def refresh(refresh_req: RefreshRequest, db: Session = Depends(get_db)):
+    """
+    Rotate tokens silently using a valid refresh token.
+    Frontend should call this BEFORE the access_token expires (use expires_in).
+    """
+    access_token, new_refresh_token = AuthService.refresh_session(db, refresh_req.refresh_token)
+    expires_in = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    
+    return {
+        "access_token": access_token,
+        "refresh_token": new_refresh_token,
+        "token_type": "bearer",
+        "expires_in": expires_in,
+    }
+
+@router.post("/forgot-password")
+def forgot_password(req: ForgotPasswordRequest, db: Session = Depends(get_db)):
+    """Standard security: Always return Success message."""
+    AuthService.forgot_password(db, req.email)
+    return {"message": "If an account exists, a reset link has been sent to your email."}
+
+@router.post("/reset-password")
+def reset_password(req: ResetPasswordRequest, db: Session = Depends(get_db)):
+    """Reset password and invalidate all existing JWTs by incrementing version."""
+    success = AuthService.reset_password(db, req.token, req.new_password)
+    if not success:
+        raise HTTPException(status_code=400, detail="Invalid/Expired token or weak password")
+    return {"message": "Password successfully reset. Please log in with your new password."}
+
+@router.get("/me", response_model=UserResponse)
+def get_me(current_user: User = Depends(get_current_user)):
+    """Get current authenticated user's profile."""
+    return current_user

@@ -7,6 +7,10 @@ from app.db.session import init_db
 from app.api.chatbot import router as chatbot_router
 from app.api.leads import router as leads_router
 from app.api.intents import router as intents_router
+from app.api.auth import router as auth_router
+from app.api.users import router as users_router
+from app.api.admin import router as admin_router
+from app.api.sales import router as sales_router
 
 # ── Simplified Production-Ready Logging ──────────────────────────────
 logging.basicConfig(
@@ -32,7 +36,8 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.APP_NAME,
-        version="4.0.0",
+        description="EXIM Trade Intelligence Platform — Auth & AI Core",
+        version="5.0.0",
         lifespan=lifespan
     )
 
@@ -47,9 +52,13 @@ def create_app() -> FastAPI:
     )
 
     # ── API Routes (Consolidated) ───────────────────────────────────
+    app.include_router(auth_router)
+    app.include_router(users_router)
     app.include_router(chatbot_router)
     app.include_router(leads_router)
     app.include_router(intents_router)
+    app.include_router(admin_router)
+    app.include_router(sales_router)
 
     # Health Checks
     @app.get("/health", tags=["System"])
