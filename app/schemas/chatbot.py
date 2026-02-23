@@ -51,6 +51,7 @@ class SessionInitResponse(BaseModel):
     type: Optional[ResponseType] = ResponseType.MESSAGE
     cta_label: Optional[str] = None
     action: Optional[str] = None
+    conversation_status: Optional[str] = "bot"
 
 class ChatMessageRequest(BaseModel):
     # sessionId removed from body for security
@@ -65,7 +66,9 @@ class ChatMessageResponse(BaseModel):
     cta_label: Optional[str] = None
     action: Optional[str] = None
     intent: Optional[str] = None # For visibility in Swagger/Debug
+    role: Optional[str] = None # For frontend history mapping
     has_greeted: Optional[bool] = None
+    conversation_status: Optional[str] = "bot"
 
 class LeadResponse(BaseModel):
     id: UUID
@@ -163,17 +166,14 @@ class LeadSubmitRequest(BaseModel):
                 parsed, phonenumbers.PhoneNumberFormat.E164
             )
         except Exception:
-            raise ValueError(
-                "Phone number must be in international format with country code, "
-                "e.g. +919876543210 or +12025551234"
-            )
+            raise ValueError("Invalid phone number. Please include the country code (e.g., +91).")
 
     @field_validator("hp_field")
     @classmethod
     def honeypot_must_be_empty(cls, v: Optional[str]) -> Optional[str]:
         """Honeypot: any bot that fills this field is rejected silently."""
         if v and v.strip():
-            logger.warning({"event": "spam_honeypot_triggered", "hp_value": v[:30]})
+            logger.warning({"event": "spam_honeypot_triggered", "hp_value": v[:30] if v else ""})
             raise ValueError("Invalid form submission detected")
         return v
 

@@ -19,12 +19,14 @@ router = APIRouter(prefix="/leads", tags=["Leads Admin"])
 
 @router.post("/submit", summary="Submit chatbot lead form")
 def submit_lead(
+    request: Request,
     lead_req: LeadSubmitRequest,
     db: Session = Depends(get_db)
 ):
     """
     Simplified Lead Submission.
-    Validates via Pydantic and checks for duplicate emails.
+    Validates via Pydantic, checks for duplicate emails,
+    and triggers agent takeover flow if session exists.
     """
     # ── 1. Duplicate email detection ────────────────────────────────────────
     normalized_email = lead_req.business_email.strip().lower()
@@ -50,6 +52,29 @@ def submit_lead(
     except IntegrityError:
         db.rollback()
         raise HTTPException(status_code=409, detail="Duplicate lead detected.")
+
+    # ── 3. Trigger Agent Takeover — update session status ───────────────────
+    from app.core.config import settings as app_settings
+    from app.models.chat_session import ChatSession
+    from app.services import session_service
+
+    session_id = request.cookies.get(app_settings.SESSION_COOKIE_NAME)
+    if session_id:
+        chat_session = (
+            db.query(ChatSession)
+            .filter(ChatSession.session_id == session_id, ChatSession.is_active == True)
+            .first()
+        )
+        if chat_session:
+            chat_session.status = "waiting_for_agent"
+            db.commit()
+
+            # Save system farewell message
+            session_service.save_message(
+                db, chat_session,
+                "Thank you. Our agent will connect with you shortly.",
+                "system",
+            )
 
     return {
         "success": True,

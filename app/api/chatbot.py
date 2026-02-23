@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 
 from app.core.dependencies import get_db
 from app.core.config import settings
+from app.models.chat_session import ChatSession
+from app.models.chat_message import ChatMessage
 from app.services.chatbot import ChatbotService
 from app.services import session_service, intent_service, greeting_handler
 from app.services.intent_service import IntentType
@@ -37,7 +39,8 @@ def initialize_session(request: Request, response: Response, db: Session = Depen
                 "state": active_session.chat_state,
                 "type": "CTA",
                 "cta_label": "Book Demo",
-                "action": "OPEN_LEAD_FORM"
+                "action": "OPEN_LEAD_FORM",
+                "conversation_status": getattr(active_session, "status", "bot"),
             }
 
     # Extract client info for new session
@@ -57,7 +60,8 @@ def initialize_session(request: Request, response: Response, db: Session = Depen
         "state": ChatState.START,
         "type": "CTA",
         "cta_label": "Book Demo",
-        "action": "OPEN_LEAD_FORM"
+        "action": "OPEN_LEAD_FORM",
+        "conversation_status": "bot",
     }
 
 # ── 2. Message Exchange ───────────────────────────────────────────────
@@ -65,6 +69,7 @@ def initialize_session(request: Request, response: Response, db: Session = Depen
 def send_message(request: Request, msg_req: ChatMessageRequest, db: Session = Depends(get_db)):
     """
     Processes user messages and generates bot responses.
+    Enforces conversation status gate — bot is blocked when status != 'bot'.
     """
     session_id = request.cookies.get(settings.SESSION_COOKIE_NAME)
     if not session_id:
@@ -74,6 +79,39 @@ def send_message(request: Request, msg_req: ChatMessageRequest, db: Session = De
     if not active_session:
         raise HTTPException(status_code=401, detail="Invalid session.")
 
+    # ── Status Gate — bot must NEVER respond when not in 'bot' mode ──────
+    session_status = getattr(active_session, "status", "bot")
+
+    if session_status == "waiting_for_agent":
+        msg = "Our agent will join shortly. Please wait."
+        session_service.save_message(db, active_session, msg_req.message, "user")
+        session_service.save_message(db, active_session, msg, "system")
+        return {
+            "sessionId": session_id,
+            "message": msg,
+            "type": ResponseType.MESSAGE,
+            "state": active_session.chat_state,
+        }
+
+    if session_status == "human":
+        msg = "You are now connected with a sales agent. Please use the live chat."
+        return {
+            "sessionId": session_id,
+            "message": msg,
+            "type": ResponseType.MESSAGE,
+            "state": active_session.chat_state,
+        }
+
+    if session_status == "closed":
+        msg = "This conversation has been closed. Thank you for reaching out."
+        return {
+            "sessionId": session_id,
+            "message": msg,
+            "type": ResponseType.MESSAGE,
+            "state": active_session.chat_state,
+        }
+
+    # ── Status == "bot" — normal AI processing ───────────────────────────
     user_message = msg_req.message
     intent = intent_service.detect_intent(db, user_message)
 
@@ -99,7 +137,42 @@ def send_message(request: Request, msg_req: ChatMessageRequest, db: Session = De
         "state": result["state"]
     }
 
-# ── 3. Session Termination ────────────────────────────────────────────
+# ── 3. Chat History (Persistence) ─────────────────────────────────────
+@router.get("/history", response_model=List[ChatMessageResponse])
+def get_chat_history(request: Request, db: Session = Depends(get_db)):
+    """
+    Returns full message history for the current session to enable persistence.
+    """
+    session_id = request.cookies.get(settings.SESSION_COOKIE_NAME)
+    if not session_id:
+        return []
+
+    active_session = session_service.get_active_session(db, session_id)
+    if not active_session:
+        return []
+
+    messages = (
+        db.query(ChatMessage)
+        .filter(ChatMessage.session_id == session_id)
+        .order_by(ChatMessage.created_at_utc.asc())
+        .all()
+    )
+
+    # Map database models to ChatMessageResponse schema
+    history = []
+    for m in messages:
+        history.append({
+            "sessionId": session_id,
+            "message": m.message_text,
+            "role": m.message_type, # Frontend expects 'role' for UI
+            "state": active_session.chat_state, # Defaulting to current state
+            "type": ResponseType.MESSAGE,
+            "conversation_status": getattr(active_session, "status", "bot"),
+        })
+
+    return history
+
+# ── 4. Session Termination ────────────────────────────────────────────
 @router.post("/session/end")
 def end_session(request: Request, response: Response, db: Session = Depends(get_db)):
     session_id = request.cookies.get(settings.SESSION_COOKIE_NAME)

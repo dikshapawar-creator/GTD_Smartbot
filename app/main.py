@@ -1,6 +1,6 @@
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.db.session import init_db
@@ -11,6 +11,8 @@ from app.api.auth import router as auth_router
 from app.api.users import router as users_router
 from app.api.admin import router as admin_router
 from app.api.sales import router as sales_router
+from app.api.live_chat import router as live_chat_router
+from app.api.ws_chat import router as ws_router
 
 # ── Simplified Production-Ready Logging ──────────────────────────────
 logging.basicConfig(
@@ -42,20 +44,45 @@ def create_app() -> FastAPI:
     )
 
     # ── CORS Configuration ──────────────────────────────────────────
-    # Explicitly allowed origins for production stability
+    # Development-ready CORS: Allow all local/network variations
+    dev_origins = [
+        "http://localhost:3000",
+        "https://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:8000",
+        "http://192.168.1.58:3000",
+        "http://192.168.1.58:3001",
+        "http://192.168.1.58:8000",
+        "http://192.168.1.58",
+        settings.FRONTEND_ORIGIN,
+    ]
+    # Remove duplicates and None
+    origins = list(set([o for o in dev_origins if o]))
+
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[settings.FRONTEND_ORIGIN],
+        allow_origins=origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["*"],
     )
+
+    # ── Request Logging Middleware ──────────────────────────────────
+    @app.middleware("http")
+    async def log_requests(request: Request, call_next):
+        logger.info(f"Incoming request: {request.method} {request.url} | Origin: {request.headers.get('origin')}")
+        response = await call_next(request)
+        logger.info(f"Response status: {response.status_code}")
+        return response
 
     # ── API Routes (Consolidated) ───────────────────────────────────
     app.include_router(auth_router)
     app.include_router(users_router)
     app.include_router(chatbot_router)
     app.include_router(leads_router)
+    app.include_router(live_chat_router)
+    app.include_router(ws_router)
     app.include_router(intents_router)
     app.include_router(admin_router)
     app.include_router(sales_router)

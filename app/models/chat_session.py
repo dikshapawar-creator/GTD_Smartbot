@@ -1,10 +1,11 @@
 """
 ChatSession model — SQL Server source of truth for all chat sessions.
-Includes enterprise features: inactivity tracking, metrics, and optimized indexing.
+Includes enterprise features: inactivity tracking, metrics, optimized indexing,
+and human agent takeover state management.
 """
 import uuid
 from sqlalchemy import (
-    Column, String, DateTime, Boolean, BigInteger, Integer, Index
+    Column, String, DateTime, Boolean, BigInteger, Integer, Index, ForeignKey
 )
 from app.db.session import Base
 
@@ -46,7 +47,16 @@ class ChatSession(Base):
     # Chatbot conversation state stored in DB (replaces in-memory dict)
     chat_state = Column(String(50), nullable=False, default="TRADE_TYPE")
 
+    # ── Human Agent Takeover ──────────────────────────────────────────────
+    # State machine: bot → waiting_for_agent → human → closed
+    status = Column(String(20), nullable=False, default="bot", index=True)
+    # FK to users.id — the agent currently handling this conversation
+    assigned_agent_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    # Prevents multiple agents from claiming the same conversation
+    is_locked = Column(Boolean, default=False, nullable=False)
+
     __table_args__ = (
         Index("ix_chat_sessions_session_id_active", "session_id", "is_active"),
         Index("ix_chat_sessions_last_activity", "last_activity_utc"),
+        Index("ix_chat_sessions_status", "status"),
     )
