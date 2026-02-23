@@ -3,7 +3,7 @@ from typing import Optional
 
 
 class Settings(BaseSettings):
-    APP_NAME: str = "EXIM Chatbot"
+    APP_NAME: str = "GTD Service Intelligence"
     DATABASE_URL: str
     SECRET_KEY: str = "your-secret-key-here"
     DEBUG: bool = True

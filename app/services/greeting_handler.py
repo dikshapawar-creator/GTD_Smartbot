@@ -17,7 +17,7 @@ def handle_greeting(db: Session, chat_session: ChatSession) -> dict:
     config = db.query(IntentConfig).filter(IntentConfig.intent_key == "GREETING").first()
     
     # Fallback to hardcoded if not in DB (safety)
-    response_text = config.response_text if config else "Hello! How can I assist you today?"
+    response_text = config.response_text if config else "Hello! Welcome to GTD Service. How can I assist you today?"
     
     if not chat_session.has_greeted:
         chat_session.has_greeted = True

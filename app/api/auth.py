@@ -82,9 +82,7 @@ def forgot_password(req: ForgotPasswordRequest, db: Session = Depends(get_db)):
 @router.post("/reset-password")
 def reset_password(req: ResetPasswordRequest, db: Session = Depends(get_db)):
     """Reset password and invalidate all existing JWTs by incrementing version."""
-    success = AuthService.reset_password(db, req.token, req.new_password)
-    if not success:
-        raise HTTPException(status_code=400, detail="Invalid/Expired token or weak password")
+    AuthService.reset_password(db, req.token, req.new_password)
     return {"message": "Password successfully reset. Please log in with your new password."}
 
 @router.get("/me", response_model=UserResponse)

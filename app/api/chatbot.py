@@ -33,7 +33,7 @@ def initialize_session(request: Request, response: Response, db: Session = Depen
         if active_session:
             return {
                 "session_token": active_session.session_id,
-                "message": "Welcome back! How can I help you today?",
+                "message": "Welcome back to GTD Service! How can I assist with your trade intelligence today?",
                 "state": active_session.chat_state,
                 "type": "CTA",
                 "cta_label": "Book Demo",
@@ -53,7 +53,7 @@ def initialize_session(request: Request, response: Response, db: Session = Depen
 
     return {
         "session_token": new_session.session_id,
-        "message": "Welcome! Are you looking to import or export data?",
+        "message": "Welcome to GTD Service! Are you looking to import/export data or access our GTIS database? I’m here to assist you — please let me know how I can help.",
         "state": ChatState.START,
         "type": "CTA",
         "cta_label": "Book Demo",

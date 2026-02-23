@@ -129,6 +129,12 @@ class AuthService:
         """Standard behavior: Always return Success."""
         user = db.query(User).filter(User.email == email, User.is_active == True).first()
         if user:
+            # Revoke any previous unused tokens for this user
+            db.query(PasswordReset).filter(
+                PasswordReset.user_id == user.id,
+                PasswordReset.is_used == False
+            ).update({"is_used": True}) # Marking as used effectively revokes it
+
             raw_token = secrets.token_urlsafe(32)
             db_reset = PasswordReset(
                 user_id=user.id,
@@ -146,13 +152,17 @@ class AuthService:
     def reset_password(db: Session, token: str, new_password: str) -> bool:
         t_hash = hash_token(token)
         reset_req = db.query(PasswordReset).filter(
-            PasswordReset.token_hash == t_hash,
-            PasswordReset.expires_at > datetime.utcnow(),
-            PasswordReset.is_used == False
+            PasswordReset.token_hash == t_hash
         ).first()
 
         if not reset_req:
-            return False
+            raise HTTPException(status_code=400, detail="Invalid reset token. Please request a new one.")
+
+        if reset_req.is_used:
+             raise HTTPException(status_code=400, detail="This token has already been used.")
+
+        if reset_req.expires_at < datetime.utcnow():
+             raise HTTPException(status_code=400, detail="Reset token has expired. Please request a new one.")
 
         user = reset_req.user
         user.password_hash = get_password_hash(new_password)
