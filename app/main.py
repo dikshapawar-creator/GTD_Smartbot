@@ -44,29 +44,16 @@ def create_app() -> FastAPI:
     )
 
     # ── CORS Configuration ──────────────────────────────────────────
-    # Development-ready CORS: Allow all local/network variations
-    dev_origins = [
-        "http://localhost:3000",
-        "https://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:8000",
-        "http://192.168.1.58:3000",
-        "http://192.168.1.58:3001",
-        "http://192.168.1.58:8000",
-        "http://192.168.1.58",
-        settings.FRONTEND_ORIGIN,
-    ]
-    # Remove duplicates and None
-    origins = list(set([o for o in dev_origins if o]))
-
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=origins,
+        allow_origins=settings.CORS_ORIGINS,
+        allow_origin_regex=r"https://.*\.vercel\.app",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
         expose_headers=["*"],
     )
+
 
     # ── Request Logging Middleware ──────────────────────────────────
     @app.middleware("http")

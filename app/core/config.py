@@ -20,9 +20,10 @@ class Settings(BaseSettings):
 
     # CORS
     FRONTEND_ORIGIN: str = "http://localhost:3000"
-
-    # Security
-    ADMIN_SETUP_TOKEN: str = "initial-setup-token-replace-this"
+    CORS_ORIGINS: list[str] = [
+        "http://localhost:3000",
+        "http://localhost:8000",
+    ]
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
