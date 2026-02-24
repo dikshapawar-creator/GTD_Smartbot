@@ -26,11 +26,13 @@ async def lifespan(app: FastAPI):
     # ── Startup Logic ───────────────────────────────────────────────
     logger.info(f"Booting {settings.APP_NAME}...")
     try:
+        # init_db() now handles its own internal error logging and suppression
         init_db()
-        logger.info("Database initialized successfully.")
     except Exception as e:
-        logger.critical(f"Database initialization failed: {e}")
-        raise e
+        # This is a fallback in case init_db lets something through
+        logger.error(f"Lifespan: Unhandled database initialization error: {e}")
+        logger.warning("Lifespan: System entering Degraded Mode (DB unreachable).")
+
     yield
     # ── Shutdown Logic (if any) ─────────────────────────────────────
     logger.info("Shutting down application.")
@@ -43,25 +45,29 @@ def create_app() -> FastAPI:
         lifespan=lifespan
     )
 
-    # ── CORS Configuration ──────────────────────────────────────────
+    # ── CORS Middleware (Outermost Layer) ──────────────────────────
+    # SECURITY: Using specific origins instead of "*" to support allow_credentials=True
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.CORS_ORIGINS,
-        allow_origin_regex=r"https://.*\.vercel\.app",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
         expose_headers=["*"],
     )
 
-
     # ── Request Logging Middleware ──────────────────────────────────
     @app.middleware("http")
     async def log_requests(request: Request, call_next):
-        logger.info(f"Incoming request: {request.method} {request.url} | Origin: {request.headers.get('origin')}")
-        response = await call_next(request)
-        logger.info(f"Response status: {response.status_code}")
-        return response
+        origin = request.headers.get('origin')
+        logger.info(f"REQ: {request.method} {request.url} | ORIGIN: {origin}")
+        try:
+            response = await call_next(request)
+            logger.info(f"RES: {response.status_code}")
+            return response
+        except Exception as e:
+            logger.exception(f"Unhandled exception during request: {e}")
+            raise e
 
     # ── API Routes (Consolidated) ───────────────────────────────────
     app.include_router(auth_router)
@@ -77,7 +83,7 @@ def create_app() -> FastAPI:
     # Health Checks
     @app.get("/health", tags=["System"])
     async def health():
-        return {"status": "healthy", "app": settings.APP_NAME}
+        return {"status": "healthy", "app": settings.APP_NAME, "version": "5.0.3"}
 
     @app.get("/", tags=["System"])
     async def root():

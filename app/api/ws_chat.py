@@ -1,8 +1,13 @@
 """
 WebSocket Chat Endpoint — Real-time agent ↔ client communication.
-Route: /ws/chat/{session_id}?role=client|agent&token=<jwt_or_session_id>
+Enterprise hardened:
+- Tenant isolation for agents
+- JWT validation with token version check
+- Multi-party ownership verification
+- Clean resource cleanup
 """
 import logging
+from datetime import datetime
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from jose import jwt, JWTError
 from sqlalchemy.orm import Session as DBSession
@@ -10,11 +15,10 @@ from sqlalchemy.orm import Session as DBSession
 from app.core.config import settings
 from app.core.dependencies import get_db
 from app.db.session import SessionLocal
-from app.models.chat_session import ChatSession
+from app.models.chat_session import ChatSession, SessionStatus, ConversationMode
 from app.models.chat_message import ChatMessage
 from app.models.auth import User
 from app.services.websocket_manager import manager
-from app.services.session_service import _now_utc, _to_local
 
 logger = logging.getLogger(__name__)
 
@@ -27,24 +31,29 @@ def _get_db_session() -> DBSession:
 
 
 def _save_ws_message(
-    db: DBSession, session_id: str, text: str, sender_type: str, tz: str = "UTC"
+    db: DBSession, session_id: str, text: str, sender_type: str, tenant_id: int
 ):
-    """Persist a WebSocket message to chat_messages."""
-    now_utc = _now_utc()
-    now_local = _to_local(now_utc, tz)
+    """Persist a WebSocket message to chat_messages with tenant/session scoping."""
+    now_utc = datetime.utcnow()
+    
+    # We use session_id directly as it's a UUID, but we update the session last_activity
     msg = ChatMessage(
         session_id=session_id,
         message_type=sender_type,
         message_text=text,
         created_at_utc=now_utc,
-        created_at_local=now_local,
+        created_at_local=now_utc, # Fallback if local not available
     )
     db.add(msg)
 
-    # Update session activity
+    # Update session activity — scope by tenant_id for isolation safety
     chat_session = (
         db.query(ChatSession)
-        .filter(ChatSession.session_id == session_id)
+        .filter(
+            ChatSession.session_id == session_id,
+            ChatSession.tenant_id == tenant_id,
+            ChatSession.is_deleted == False
+        )
         .first()
     )
     if chat_session:
@@ -52,20 +61,6 @@ def _save_ws_message(
         chat_session.total_messages += 1
 
     db.commit()
-
-
-def _validate_agent_token(token: str) -> dict | None:
-    """Decode JWT and return payload if valid agent."""
-    try:
-        payload = jwt.decode(
-            token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM]
-        )
-        user_id = payload.get("sub")
-        if user_id is None:
-            return None
-        return payload
-    except JWTError:
-        return None
 
 
 @router.websocket("/ws/chat/{session_id}")
@@ -77,53 +72,81 @@ async def websocket_chat(
 ):
     """
     Bidirectional WebSocket for live chat.
-
-    - role=client, token=<session_id>  → client connection
-    - role=agent,  token=<jwt>         → agent connection
+    SECURITY: Enforces tenant isolation and role-gated access.
     """
     db = _get_db_session()
+    user_tenant_id = None
 
     try:
-        # ── Validate session exists ──────────────────────────────────────
-        chat_session = (
-            db.query(ChatSession)
-            .filter(ChatSession.session_id == session_id, ChatSession.is_active == True)
-            .first()
-        )
-        if not chat_session:
-            await websocket.close(code=4004, reason="Session not found")
-            return
-
         # ── Role-based authentication ────────────────────────────────────
         if role == "client":
             # Client must provide matching session_id as token
             if token != session_id:
                 await websocket.close(code=4001, reason="Invalid client token")
                 return
+            
+            # Fetch session to get tenant_id for later message persists
+            chat_session = (
+                db.query(ChatSession)
+                .filter(
+                    ChatSession.session_id == session_id, 
+                    ChatSession.session_status == SessionStatus.ACTIVE, 
+                    ChatSession.is_deleted == False
+                )
+                .first()
+            )
+            if not chat_session:
+                await websocket.close(code=4004, reason="Session not found or inactive")
+                return
+            
+            user_tenant_id = chat_session.tenant_id
             await manager.connect_client(session_id, websocket)
 
         elif role == "agent":
-            # Agent must provide valid JWT
-            payload = _validate_agent_token(token)
-            if not payload:
-                await websocket.close(code=4001, reason="Invalid agent token")
+            # ── Secure JWT Validation for Agent ──
+            try:
+                payload = jwt.decode(
+                    token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM]
+                )
+                agent_id = int(payload.get("sub"))
+                token_version = payload.get("token_version")
+                if not agent_id or token_version is None:
+                    raise JWTError()
+            except (JWTError, ValueError):
+                await websocket.close(code=4001, reason="Invalid authentication token")
                 return
 
-            # Verify agent exists and is active
-            agent_id = int(payload["sub"])
-            agent = db.query(User).filter(User.id == agent_id, User.is_active == True).first()
-            if not agent:
-                await websocket.close(code=4003, reason="Agent not found")
+            # Verify agent exists, is active, and token version matches
+            agent = db.query(User).filter(User.id == agent_id).first()
+            if not agent or not agent.is_active or agent.token_version != token_version:
+                await websocket.close(code=4003, reason="Account restricted or session expired")
                 return
 
-            # Verify this agent is assigned to this session
+            user_tenant_id = agent.tenant_id
+
+            # Verify session belongs to agent's tenant
+            chat_session = (
+                db.query(ChatSession)
+                .filter(
+                    ChatSession.session_id == session_id,
+                    ChatSession.tenant_id == user_tenant_id, # ← TENANT ISOLATION
+                    ChatSession.session_status == SessionStatus.ACTIVE,
+                    ChatSession.is_deleted == False
+                )
+                .first()
+            )
+            if not chat_session:
+                await websocket.close(code=4004, reason="Session not found in your tenant")
+                return
+
+            # Verify this agent is actually handling the session (if assigned)
             if chat_session.assigned_agent_id and chat_session.assigned_agent_id != agent_id:
-                await websocket.close(code=4003, reason="Another agent owns this session")
+                await websocket.close(code=4003, reason="Another agent is handling this session")
                 return
 
             await manager.connect_agent(session_id, websocket)
 
-            # Notify client that agent connected
+            # Notify client and persist system message
             await manager.send_to_client(session_id, {
                 "type": "system",
                 "message": "A sales agent has joined the conversation.",
@@ -133,11 +156,11 @@ async def websocket_chat(
                 db, session_id,
                 "A sales agent has joined the conversation.",
                 "system",
-                chat_session.timezone or "UTC",
+                user_tenant_id
             )
 
         else:
-            await websocket.close(code=4000, reason="Invalid role")
+            await websocket.close(code=4000, reason="Invalid role specified")
             return
 
         # ── Message Loop ─────────────────────────────────────────────────
@@ -147,11 +170,8 @@ async def websocket_chat(
             if not text:
                 continue
 
-            tz = chat_session.timezone or "UTC"
-
             if role == "client":
-                # Client → Agent
-                _save_ws_message(db, session_id, text, "user", tz)
+                _save_ws_message(db, session_id, text, "user", user_tenant_id)
                 await manager.send_to_agent(session_id, {
                     "type": "message",
                     "message": text,
@@ -159,8 +179,7 @@ async def websocket_chat(
                 })
 
             elif role == "agent":
-                # Agent → Client
-                _save_ws_message(db, session_id, text, "agent", tz)
+                _save_ws_message(db, session_id, text, "agent", user_tenant_id)
                 await manager.send_to_client(session_id, {
                     "type": "message",
                     "message": text,

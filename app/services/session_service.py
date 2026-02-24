@@ -10,7 +10,8 @@ from typing import Optional
 import pytz
 from sqlalchemy.orm import Session
 
-from app.models.chat_session import ChatSession
+from app.models.chat_session import ChatSession, SessionStatus, ConversationMode
+
 from app.models.chat_message import ChatMessage
 from app.core.config import settings
 
@@ -39,6 +40,7 @@ def create_session(
     country: str,
     city: str,
     timezone_str: str,
+    tenant_id: int = 2,
 ) -> ChatSession:
     """Creates a new session with activity tracking initialized."""
     session_id = str(uuid4())
@@ -47,14 +49,18 @@ def create_session(
 
     chat_session = ChatSession(
         session_id=session_id,
+        tenant_id=tenant_id,
         ip_address=ip_address,
         country=country,
         city=city,
         timezone=timezone_str,
         started_at_utc=now_utc,
         started_at_local=now_local,
-        last_activity_utc=now_utc, # Initialize activity
-        is_active=True,
+        last_activity_utc=now_utc,
+        session_status=SessionStatus.ACTIVE,
+        conversation_mode=ConversationMode.BOT,
+        status="ACTIVE",
+        is_deleted=False,
     )
     db.add(chat_session)
     db.commit()
@@ -63,22 +69,26 @@ def create_session(
     logger.info({
         "event": "session_created",
         "session_id": session_id,
+        "tenant_id": tenant_id,
         "ip": ip_address,
-        "country": country,
         "timestamp": now_utc.isoformat()
     })
     return chat_session
 
 
-def get_active_session(db: Session, session_id: str) -> Optional[ChatSession]:
+def get_active_session(db: Session, session_id: str, tenant_id: Optional[int] = None) -> Optional[ChatSession]:
     """
     Look up a session and check for inactivity-based expiry.
     """
-    chat_session = (
-        db.query(ChatSession)
-        .filter(ChatSession.session_id == session_id, ChatSession.is_active == True)
-        .first()
+    q = db.query(ChatSession).filter(
+        ChatSession.session_id == session_id, 
+        ChatSession.session_status == SessionStatus.ACTIVE,
+        ChatSession.is_deleted == False
     )
+    if tenant_id is not None:
+        q = q.filter(ChatSession.tenant_id == tenant_id)
+        
+    chat_session = q.first()
 
     if not chat_session:
         return None
@@ -91,47 +101,46 @@ def get_active_session(db: Session, session_id: str) -> Optional[ChatSession]:
         logger.info({
             "event": "session_expired_inactivity",
             "session_id": session_id,
-            "last_activity": chat_session.last_activity_utc.isoformat()
         })
-        expire_session(db, session_id)
+        close_session(db, session_id, tenant_id)
         return None
 
     return chat_session
 
 
-def expire_session(db: Session, session_id: str) -> bool:
-    """Mark as inactive and calculate duration metric."""
-    chat_session = (
+def close_session(db: Session, session_id: str, tenant_id: Optional[int] = None) -> bool:
+    """Mark as CLOSED and calculate duration metric."""
+    q = (
         db.query(ChatSession)
-        .filter(ChatSession.session_id == session_id)
-        .first()
+        .filter(ChatSession.session_id == session_id, ChatSession.is_deleted == False)
     )
-    if not chat_session or not chat_session.is_active:
+    if tenant_id is not None:
+        q = q.filter(ChatSession.tenant_id == tenant_id)
+        
+    chat_session = q.first()
+    if not chat_session or chat_session.session_status == SessionStatus.CLOSED:
         return False
 
     now_utc = _now_utc()
     now_local = _to_local(now_utc, chat_session.timezone or "UTC")
 
-    chat_session.is_active = False
+    chat_session.session_status = SessionStatus.CLOSED
     chat_session.ended_at_utc = now_utc
     chat_session.ended_at_local = now_local
+    chat_session.is_locked = False
     
     # Calculate duration
     duration = (now_utc - chat_session.started_at_utc).total_seconds()
     chat_session.duration_seconds = int(duration)
 
     db.commit()
-    logger.info({
-        "event": "session_ended",
-        "session_id": session_id,
-        "duration_seconds": chat_session.duration_seconds
-    })
+    logger.info({"event": "session_closed", "session_id": session_id})
     return True
 
 
 def update_chat_state(db: Session, chat_session: ChatSession, new_state: str) -> None:
     chat_session.chat_state = new_state
-    chat_session.last_activity_utc = _now_utc() # Update activity on state change
+    chat_session.last_activity_utc = _now_utc()
     db.commit()
 
 
@@ -142,7 +151,7 @@ def save_message(
     message_type: str,
 ) -> ChatMessage:
     """
-    Persist message, update activity, and increment total_messages count.
+    Persist message, update activity, increment total_messages, and handle versioning.
     """
     now_utc = _now_utc()
     now_local = _to_local(now_utc, chat_session.timezone or "UTC")
@@ -160,6 +169,46 @@ def save_message(
     # Update session metrics and activity
     chat_session.last_activity_utc = now_utc
     chat_session.total_messages += 1
+    
+    # Optimistic locking increment
+    chat_session.version += 1
 
     db.commit()
     return msg
+
+
+def trigger_agent_takeover(db: Session, session_id: str, lead_id: Optional[str] = None) -> bool:
+    """
+    Initiate handover logic — just updates linkage, UI handles mode switch.
+    In a real system, this might set a 'WAITING_FOR_AGENT' mode if we added one,
+    but we keep it lean with BOT -> HUMAN transition.
+    """
+    chat_session = (
+        db.query(ChatSession)
+        .filter(
+            ChatSession.session_id == session_id, 
+            ChatSession.session_status == SessionStatus.ACTIVE,
+            ChatSession.is_deleted == False
+        )
+        .first()
+    )
+    if chat_session:
+        # We don't switch to HUMAN yet, just link the lead.
+        # The agent clicks "Intervene" to switch mode.
+        if lead_id:
+            chat_session.lead_id = lead_id
+        
+        chat_session.version += 1
+        db.commit()
+
+        save_message(
+            db, chat_session,
+            "An agent has been notified and will review your request.",
+            "system",
+        )
+        logger.info(f"Handover initiated for session {session_id}")
+        return True
+    return False
+
+
+

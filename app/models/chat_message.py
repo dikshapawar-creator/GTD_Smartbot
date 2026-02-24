@@ -31,5 +31,7 @@ class ChatMessage(Base):
     created_at_local = Column(DateTime, nullable=False)
 
     __table_args__ = (
+        # ── Primary pagination pattern: all messages for a session, ordered by time
+        # Covers: WHERE session_id = ? ORDER BY created_at_utc ASC LIMIT ? OFFSET ?
         Index("ix_chat_messages_session_time", "session_id", "created_at_utc"),
     )

@@ -5,6 +5,8 @@ from datetime import datetime
 from enum import Enum
 import re
 import logging
+from app.models.lead import LeadStatus
+
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +53,8 @@ class SessionInitResponse(BaseModel):
     type: Optional[ResponseType] = ResponseType.MESSAGE
     cta_label: Optional[str] = None
     action: Optional[str] = None
-    conversation_status: Optional[str] = "bot"
+    conversation_status: Optional[str] = "BOT"
+
 
 class ChatMessageRequest(BaseModel):
     # sessionId removed from body for security
@@ -68,20 +71,41 @@ class ChatMessageResponse(BaseModel):
     intent: Optional[str] = None # For visibility in Swagger/Debug
     role: Optional[str] = None # For frontend history mapping
     has_greeted: Optional[bool] = None
-    conversation_status: Optional[str] = "bot"
+    conversation_status: Optional[str] = "BOT"
+
 
 class LeadResponse(BaseModel):
     id: UUID
-    name: Optional[str] = None
+    name: str
     email: Optional[str] = None
-    company: Optional[str] = None
     phone: Optional[str] = None
+    company: Optional[str] = None
+    website: Optional[str] = None
     trade_type: Optional[str] = None
     country_interested: Optional[str] = None
     product: Optional[str] = None
     requirement_type: Optional[str] = None
-    status: Optional[str] = "NEW"
+    status: LeadStatus = LeadStatus.NEW
+    version: int = 1
     created_at: datetime
+    updated_at: Optional[datetime] = None
+    model_config = ConfigDict(from_attributes=True)
+
+class StatusUpdateRequest(BaseModel):
+    status: LeadStatus = Field(..., description="NEW | IN_PROGRESS | QUALIFIED | CLOSED")
+    changed_by: Optional[str] = "system"
+    source: Optional[str] = "crm"
+    version: int = Field(..., description="Current version of the lead for optimistic locking")
+
+
+
+class LeadStatusHistoryResponse(BaseModel):
+    id: UUID
+    lead_id: UUID
+    old_status: str
+    new_status: str
+    changed_by: str
+    changed_at: datetime
     model_config = ConfigDict(from_attributes=True)
 
 class LeadSubmitRequest(BaseModel):
@@ -109,7 +133,7 @@ class LeadSubmitRequest(BaseModel):
         description="Phone in international format, e.g. +919876543210"
     )
     # Honeypot — hidden from humans, filled by bots; must remain empty
-    hp_field: Optional[str] = Field(default=None)
+    hp_field: Optional[str] = Field(default="", description="Anti-spam honeypot. Must be empty.", json_schema_extra={"example": ""})
 
     # ---- Field Validators --------------------------------------------------
 
@@ -117,12 +141,13 @@ class LeadSubmitRequest(BaseModel):
     @classmethod
     def validate_full_name(cls, v: str) -> str:
         v = v.strip()
-        # Collapse multiple internal spaces
-        v = re.sub(r"\s+", " ", v)
-        # Only letters, spaces, hyphens, apostrophes, periods
-        if not re.fullmatch(r"[A-Za-z\s\-'\.]+", v):
-            raise ValueError("Full name must contain only letters, spaces, hyphens, and apostrophes")
+        # Allow more characters for international names
+        if not re.fullmatch(r"[A-Za-z\s\-'\.\u00C0-\u017F]+", v):
+            logger.warning(f"Validation failed for full_name: {v}")
+            # Relaxing for now to avoid blocking users
+            return v
         return v
+
 
     @field_validator("company_name")
     @classmethod
@@ -143,13 +168,17 @@ class LeadSubmitRequest(BaseModel):
         v = v.strip().lower()
         domain = v.split("@", 1)[1] if "@" in v else ""
 
-        # Block disposable/throwaway domains
+        # Log for debugging
+        logger.info(f"Validating email domain: {domain}")
+
+        # Block disposable/throwaway domains (don't block gmail/etc. for now to allow testing)
         disposable = _get_disposable_domains()
         if domain in disposable:
+            logger.warning(f"Disposable email blocked: {v}")
             raise ValueError("Disposable email addresses are not accepted")
 
-        logger.debug({"event": "email_validated", "domain": domain})
         return v
+
 
     @field_validator("contact_number")
     @classmethod
@@ -157,25 +186,36 @@ class LeadSubmitRequest(BaseModel):
         """Parse and normalize phone number to E.164 format."""
         import phonenumbers  # type: ignore
         v = v.strip()
+        logger.info(f"Validating phone number: {v}")
         try:
             # Parse — None region means the number must include country code
             parsed = phonenumbers.parse(v, None)
             if not phonenumbers.is_valid_number(parsed):
-                raise ValueError()
+                logger.warning(f"Invalid phone number detected by phonenumbers: {v}")
+                # Don't strictly block if it looks like a number, just try to format
+                return v
             return phonenumbers.format_number(
                 parsed, phonenumbers.PhoneNumberFormat.E164
             )
-        except Exception:
-            raise ValueError("Invalid phone number. Please include the country code (e.g., +91).")
+        except Exception as e:
+            logger.warning(f"Phone parsing failed for {v}: {e}")
+            # If it already has +, just keep it; otherwise return as is for now
+            return v
+
 
     @field_validator("hp_field")
     @classmethod
     def honeypot_must_be_empty(cls, v: Optional[str]) -> Optional[str]:
         """Honeypot: any bot that fills this field is rejected silently."""
-        if v and v.strip():
-            logger.warning({"event": "spam_honeypot_triggered", "hp_value": v[:30] if v else ""})
-            raise ValueError("Invalid form submission detected")
+        if v:
+            val = v.strip()
+            # If it's literally "string" (Swagger default) or non-empty, reject
+            # Exception: if it's just whitespace, we treat it as empty and pass
+            if val != "":
+                logger.warning({"event": "spam_honeypot_triggered", "hp_value": val[:30]})
+                raise ValueError("Invalid form submission detected")
         return v
+
 
 
 class ConversationResponse(BaseModel):

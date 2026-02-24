@@ -5,58 +5,97 @@ and human agent takeover state management.
 """
 import uuid
 from sqlalchemy import (
-    Column, String, DateTime, Boolean, BigInteger, Integer, Index, ForeignKey
+    Column, String, DateTime, Boolean, BigInteger, Integer, Index, ForeignKey, Enum
 )
 from app.db.session import Base
+import enum
+
+
+class SessionStatus(str, enum.Enum):
+    ACTIVE = "ACTIVE"
+    CLOSED = "CLOSED"
+
+
+class ConversationMode(str, enum.Enum):
+    BOT = "BOT"
+    HUMAN = "HUMAN"
 
 
 class ChatSession(Base):
     __tablename__ = "chat_sessions"
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    
+    # Scalability & Multi-tenancy
+    tenant_id = Column(Integer, nullable=False, default=1, index=True)
 
-    # Server-generated UUID v4, carried as HTTP-only cookie by browser
+    # Server-generated UUID v4
     session_id = Column(String(36), nullable=False, unique=True, index=True)
 
-    # Optional — if the platform adds auth later
+    # Ownership & Linkage
     user_id = Column(String(255), nullable=True)
+    lead_id = Column(String(36),  nullable=True, index=True)
 
-    # IP & Geolocation — captured ONCE at session creation
+    # IP & Geolocation
     ip_address = Column(String(45), nullable=True)
     country = Column(String(100), nullable=True)
     city = Column(String(100), nullable=True)
     timezone = Column(String(100), nullable=True, default="UTC")
 
-    # Lifecycle & Activity Tracking
+    # Lifecycle State
+    session_status = Column(
+        Enum(SessionStatus, name="session_status_enum"), 
+        nullable=False, 
+        default=SessionStatus.ACTIVE, 
+        index=True
+    )
+    
+    # Handler State
+    conversation_mode = Column(
+        Enum(ConversationMode, name="conversation_mode_enum"), 
+        nullable=False, 
+        default=ConversationMode.BOT, 
+        index=True
+    )
+
+    # Lifecycle Timestamps
     started_at_utc = Column(DateTime, nullable=False, index=True)
     started_at_local = Column(DateTime, nullable=False)
     last_activity_utc = Column(DateTime, nullable=False, index=True)
     ended_at_utc = Column(DateTime, nullable=True)
     ended_at_local = Column(DateTime, nullable=True)
+    
+    # Agent Assignment
+    assigned_agent_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    assigned_at = Column(DateTime, nullable=True)
 
-    # Metrics
+    # Concurrency & Soft Delete
+    version = Column(Integer, default=1, nullable=False) # Optimistic Locking
+    is_deleted = Column(Boolean, default=False, nullable=False, index=True)
+    is_active = Column(Boolean, default=True, nullable=False)  # DB has this as NOT NULL BIT
+
+    # Metrics & UI Helpers
     total_messages = Column(Integer, default=0, nullable=False)
     duration_seconds = Column(Integer, nullable=True)
-
-    # Session state flag
-    is_active = Column(Boolean, default=True, nullable=False, index=True)
-
-    # Greeting tracking (Loop prevention)
+    is_locked = Column(Boolean, default=False, nullable=False)
     has_greeted = Column(Boolean, default=False, nullable=False)
-
-    # Chatbot conversation state stored in DB (replaces in-memory dict)
     chat_state = Column(String(50), nullable=False, default="TRADE_TYPE")
 
-    # ── Human Agent Takeover ──────────────────────────────────────────────
-    # State machine: bot → waiting_for_agent → human → closed
-    status = Column(String(20), nullable=False, default="bot", index=True)
-    # FK to users.id — the agent currently handling this conversation
-    assigned_agent_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    # Prevents multiple agents from claiming the same conversation
-    is_locked = Column(Boolean, default=False, nullable=False)
+    # Legacy field (kept for migration compatibility) — non-nullable in some DB versions
+    status = Column(String(50), nullable=False, default="ACTIVE")
 
     __table_args__ = (
-        Index("ix_chat_sessions_session_id_active", "session_id", "is_active"),
-        Index("ix_chat_sessions_last_activity", "last_activity_utc"),
-        Index("ix_chat_sessions_status", "status"),
+        # ── Primary query: live dashboard — tenant's active sessions by recency
+        Index("ix_sessions_tenant_status_activity", "tenant_id", "session_status", "last_activity_utc"),
+        # ── History page: all tenant sessions ordered by time (covers date filters)
+        Index("ix_sessions_tenant_activity_desc", "tenant_id", "last_activity_utc"),
+        # ── Soft-delete guard — frequently paired with all filters
+        Index("ix_sessions_tenant_deleted", "tenant_id", "is_deleted"),
+        # ── Repeat visitor aggregation: lead history lookup by tenant
+        Index("ix_sessions_tenant_lead", "tenant_id", "lead_id"),
+        # ── Mode filter for intervention dashboard
+        Index("ix_sessions_active_mode", "session_status", "conversation_mode", "is_deleted"),
+        # ── Agent workload queries
+        Index("ix_sessions_agent", "assigned_agent_id", "session_status"),
     )
+
