@@ -23,7 +23,11 @@ class Settings(BaseSettings):
     # CORS
     # We use Any to prevent Pydantic from crashing on internal JSON parsing
     # from environment variables. The validator will handle conversion.
-    CORS_ORIGINS: Any = ["http://localhost:3000"]
+    CORS_ORIGINS: Any = [
+        "http://localhost:3000",
+        "http://localhost:8000",
+        "https://gtt-smartbot-frontend.vercel.app",
+    ]
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
