@@ -78,8 +78,9 @@ class ChatSession(Base):
     total_messages = Column(Integer, default=0, nullable=False)
     duration_seconds = Column(Integer, nullable=True)
     is_locked = Column(Boolean, default=False, nullable=False)
+    agent_joined = Column(Boolean, default=False, nullable=False) # Bot uses this to stop replying
     has_greeted = Column(Boolean, default=False, nullable=False)
-    chat_state = Column(String(50), nullable=False, default="TRADE_TYPE")
+    chat_state = Column(String(50), nullable=False, default="START")
 
     # Legacy field (kept for migration compatibility) — non-nullable in some DB versions
     status = Column(String(50), nullable=False, default="ACTIVE")

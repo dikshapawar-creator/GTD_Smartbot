@@ -41,6 +41,7 @@ class ChatState(str, Enum):
     REQUIREMENT = "REQUIREMENT"
     COMPLETE = "COMPLETE"
     ENDED = "ENDED"
+    HANDOFF_SENT = "HANDOFF_SENT"
 
 class ResponseType(str, Enum):
     MESSAGE = "MESSAGE"

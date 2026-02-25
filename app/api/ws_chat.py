@@ -139,6 +139,10 @@ async def websocket_chat(
                 await websocket.close(code=4004, reason="Session not found in your tenant")
                 return
 
+            # Sync bot-stop flag
+            chat_session.agent_joined = True
+            db.commit()
+
             # Verify this agent is actually handling the session (if assigned)
             if chat_session.assigned_agent_id and chat_session.assigned_agent_id != agent_id:
                 await websocket.close(code=4003, reason="Another agent is handling this session")

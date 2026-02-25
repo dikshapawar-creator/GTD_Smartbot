@@ -5,45 +5,45 @@ import re
 import logging
 from enum import Enum
 from sqlalchemy.orm import Session
-from app.models.intent_config import IntentConfig
 
 logger = logging.getLogger(__name__)
 
 class IntentType(Enum):
     GREETING = "GREETING"
-    SALES_DEMO = "SALES_DEMO"
-    TRADE_FLOW = "TRADE_FLOW"
+    IMPORT_EXPORT = "IMPORT_EXPORT"
+    DEMO = "DEMO"
+    HANDOFF = "HANDOFF"
     UNKNOWN = "UNKNOWN"
 
 def detect_intent(db: Session, message: str) -> IntentType:
     """
-    Detects the intent by querying the intent_configs table.
-    Allows for dynamic keyword management without code changes.
+    Detects user intent using hardcoded keyword matching with strict priority:
+    1. HANDOFF, 2. DEMO, 3. IMPORT_EXPORT, 4. GREETING
     """
     if not message:
         return IntentType.UNKNOWN
 
-    clean_msg = message.lower().strip()
+    message = message.lower().strip()
 
-    # Load all configs from DB
-    configs = db.query(IntentConfig).all()
-    
-    for cfg in configs:
-        keywords = cfg.keywords if isinstance(cfg.keywords, list) else []
-        if not keywords:
-            continue
-            
-        # Create regex pattern with word boundaries
-        pattern = r"\b(" + "|".join(re.escape(k) for k in keywords) + r")\b"
-        
-        # Special case for repetitive characters in short keywords (e.g., hi, hey)
-        if cfg.intent_key == "GREETING":
-             if re.search(pattern, clean_msg) or re.search(r"\b(hi+|hello+|hey+)\b", clean_msg):
-                logger.info({"event": "intent_detected", "intent": cfg.intent_key})
-                return IntentType[cfg.intent_key]
-        else:
-            if re.search(pattern, clean_msg):
-                logger.info({"event": "intent_detected", "intent": cfg.intent_key})
-                return IntentType[cfg.intent_key]
+    # 1. HANDOFF (Priority 1)
+    if any(word in message for word in [
+        "agent", "human", "representative", "call me", 
+        "no", "skip", "not interested", "later"
+    ]):
+        return IntentType.HANDOFF
 
-    return IntentType.TRADE_FLOW
+    # 2. DEMO (Priority 2)
+    if "demo" in message:
+        return IntentType.DEMO
+
+    # 3. IMPORT_EXPORT (Priority 3)
+    if any(word in message for word in [
+        "import", "export", "shipment", "supplier", "buyer", "trade", "data"
+    ]):
+        return IntentType.IMPORT_EXPORT
+
+    # 4. GREETING (Priority 4)
+    if any(word in message for word in ["hi", "hello", "hey", "hii", "helo", "hy"]):
+        return IntentType.GREETING
+
+    return IntentType.UNKNOWN

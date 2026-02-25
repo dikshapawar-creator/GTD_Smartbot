@@ -42,7 +42,8 @@ def create_app() -> FastAPI:
         title=settings.APP_NAME,
         description="EXIM Trade Intelligence Platform — Auth & AI Core",
         version="5.0.0",
-        lifespan=lifespan
+        lifespan=lifespan,
+        redirect_slashes=False
     )
 
     # ── Request Logging Middleware ──────────────────────────────────
