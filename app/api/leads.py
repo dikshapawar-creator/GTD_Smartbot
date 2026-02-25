@@ -39,23 +39,31 @@ def submit_lead(
     from app.services import lead_service, session_service
     from app.core.config import settings as app_settings
 
-    # 1. Process Lead (Create or Update Duplicate)
-    lead, is_duplicate = lead_service.create_or_update_lead(db, lead_req, source="chatbot")
+    try:
+        # 1. Process Lead (Create or Update Duplicate)
+        lead, is_duplicate = lead_service.create_or_update_lead(db, lead_req, source="chatbot")
 
-    # 2. Trigger Agent Takeover if session exists
-    session_id = request.cookies.get(app_settings.SESSION_COOKIE_NAME)
-    takeover_triggered = False
-    if session_id:
-        takeover_triggered = session_service.trigger_agent_takeover(db, session_id, str(lead.id))
+        # 2. Trigger Agent Takeover if session exists
+        session_id = request.cookies.get(app_settings.SESSION_COOKIE_NAME)
+        takeover_triggered = False
+        if session_id:
+            takeover_triggered = session_service.trigger_agent_takeover(db, session_id, str(lead.id))
 
-
-    return {
-        "success": True,
-        "message": "Thank you. Our team will contact you soon.",
-        "warning": "This email matches an existing record. Your request has been updated." if is_duplicate else None,
-        "reference_id": str(lead.id),
-        "takeover_triggered": takeover_triggered
-    }
+        return {
+            "success": True,
+            "message": "Thank you. Our team will contact you soon.",
+            "warning": "This email matches an existing record. Your request has been updated." if is_duplicate else None,
+            "reference_id": str(lead.id),
+            "takeover_triggered": takeover_triggered
+        }
+    except IntegrityError as e:
+        db.rollback()
+        logger.error(f"[LeadSubmit] Database integrity error: {e}")
+        raise HTTPException(status_code=409, detail="A lead with this email already exists.")
+    except Exception as e:
+        db.rollback()
+        logger.exception(f"[LeadSubmit] Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail=f"Lead submission failed: {str(e)}")
 
 
 

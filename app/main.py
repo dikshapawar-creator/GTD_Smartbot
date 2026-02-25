@@ -45,18 +45,8 @@ def create_app() -> FastAPI:
         lifespan=lifespan
     )
 
-    # ── CORS Middleware (Outermost Layer) ──────────────────────────
-    # SECURITY: Using specific origins instead of "*" to support allow_credentials=True
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.CORS_ORIGINS,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-        expose_headers=["*"],
-    )
-
     # ── Request Logging Middleware ──────────────────────────────────
+    # NOTE: Registered BEFORE CORSMiddleware so CORS wraps everything (LIFO order).
     @app.middleware("http")
     async def log_requests(request: Request, call_next):
         origin = request.headers.get('origin')
@@ -68,6 +58,17 @@ def create_app() -> FastAPI:
         except Exception as e:
             logger.exception(f"Unhandled exception during request: {e}")
             raise e
+
+    # ── CORS Middleware (Outermost Layer — registered LAST, runs FIRST in LIFO) ──
+    # SECURITY: Using specific origins instead of "*" to support allow_credentials=True
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.CORS_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["*"],
+    )
 
     # ── API Routes (Consolidated) ───────────────────────────────────
     app.include_router(auth_router)
