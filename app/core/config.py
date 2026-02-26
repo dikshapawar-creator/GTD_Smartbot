@@ -29,6 +29,7 @@ class Settings(BaseSettings):
         "http://localhost:8000",
         "https://gtt-smartbot-frontend.vercel.app",
     ]
+    CORS_ORIGIN_REGEX: str = r"https://gtt-smartbot-frontend-.*\.vercel\.app"
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
