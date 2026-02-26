@@ -15,6 +15,7 @@ from app.models.chat_message import ChatMessage
 
 from app.services.chatbot import ChatbotService
 from app.services import session_service, intent_service, greeting_handler, lead_service
+from app.core import utils
 from app.services.intent_service import IntentType
 from app.models.lead import Lead, LeadStatus
 from app.models.intent_config import IntentConfig
@@ -46,9 +47,35 @@ def initialize_session(request: Request, response: Response, db: Session = Depen
                 "conversation_status": active_session.conversation_mode,
             }
 
-    # Extract client info for new session
-    client_ip = request.client.host if request.client else "127.0.0.1"
-    new_session = session_service.create_session(db, client_ip, "Unknown", "Unknown", "UTC")
+    # Extract client info for new session (Senior IP & Fingerprinting)
+    client_ip = utils.get_client_ip(request)
+    meta = utils.get_visitor_metadata(request)
+    fingerprint = utils.generate_visitor_fingerprint(client_ip, meta["user_agent"])
+
+    print("DEBUG IP:", client_ip)
+    print("DEBUG UA:", request.headers.get("user-agent"))
+    print("DEBUG META:", meta)
+
+    # Real-time Geolocation
+    from app.services import geo_service
+    country, city, timezone_str = geo_service.lookup_ip_geo(client_ip)
+
+    new_session = session_service.create_session(
+        db, 
+        ip_address=client_ip,
+        country=country, 
+        city=city, 
+        timezone_str=timezone_str,
+        user_agent=meta["user_agent"],
+        browser=meta["browser"],
+        os_name=meta["os"],
+        device_type=meta["device_type"],
+        fingerprint=fingerprint
+    )
+
+    # Fetch professional greeting from DB for consistency
+    greeting_res = greeting_handler.handle_greeting(db, new_session)
+    # Marks has_greeted = True internally
 
     response.set_cookie(
         key=settings.SESSION_COOKIE_NAME,
@@ -59,7 +86,7 @@ def initialize_session(request: Request, response: Response, db: Session = Depen
 
     return {
         "session_token": new_session.session_id,
-        "message": "Welcome to GTD Service. Please let me know how I can assist you.",
+        "message": greeting_res["message"],
         "state": ChatState.START,
         "type": "CTA",
         "cta_label": "Book Demo",
@@ -143,11 +170,17 @@ def send_message(request: Request, msg_req: ChatMessageRequest, db: Session = De
 
     # 2a. Handle Greetings
     if intent == IntentType.GREETING and current_state == ChatState.START:
-        bot_msg = (
-            "Hello 👋 Welcome to GTD Service.\n\n"
-            "I help businesses find verified Import Export data, global buyers, and suppliers.\n\n"
-            "How may I assist you today?"
-        )
+        if not active_session.has_greeted:
+            bot_msg = (
+                "Hello 👋 Welcome to GTD Service.\n\n"
+                "I help businesses find verified Import Export data, global buyers, and suppliers.\n\n"
+                "How may I assist you today?"
+            )
+            active_session.has_greeted = True
+            db.commit()
+        else:
+            bot_msg = "Hello! How can I assist you further with your trade intelligence today?"
+
         session_service.save_message(db, active_session, bot_msg, "bot")
         return {
             "sessionId": session_id,

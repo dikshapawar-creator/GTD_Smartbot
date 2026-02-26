@@ -49,7 +49,13 @@ class LiveConversationItem(BaseModel):
     is_locked: bool = False
     lead_name: Optional[str] = None
     lead_company: Optional[str] = None
-    # NOTE: lead_email intentionally omitted from list view — use /detail endpoint
+    # Senior IP & Metadata
+    initial_ip: Optional[str] = None
+    country: Optional[str] = None
+    city: Optional[str] = None
+    browser: Optional[str] = None
+    os: Optional[str] = None
+    device_type: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -109,7 +115,12 @@ def _build_conversation_query(
     )
 
     if only_active:
-        q = q.filter(ChatSession.session_status == SessionStatus.ACTIVE)
+        # Filter for ACTIVE sessions that have had activity within the expiry window
+        expiry_limit = datetime.utcnow() - timedelta(minutes=settings.SESSION_EXPIRY_MINUTES)
+        q = q.filter(
+            ChatSession.session_status == SessionStatus.ACTIVE,
+            ChatSession.last_activity_utc >= expiry_limit
+        )
     elif status_filter and status_filter.upper() in ("ACTIVE", "CLOSED"):
         q = q.filter(ChatSession.session_status == status_filter.upper())
 
@@ -130,11 +141,6 @@ def _assemble_items(sessions, db: Session) -> List[LiveConversationItem]:
         return []
 
     lead_ids = [row[0].lead_id for row in sessions if row[0].lead_id]
-    ip_addresses = [
-        row[0].ip_address
-        for row in sessions
-        if not row[0].lead_id and row[0].ip_address
-    ]
 
     # Bulk-fetch leads
     lead_map: Dict[str, Lead] = {}
@@ -153,16 +159,17 @@ def _assemble_items(sessions, db: Session) -> List[LiveConversationItem]:
         )
         history_by_lead = {lid: max(0, count - 1) for lid, count in counts}
 
-    # Bulk-fetch history counts by IP (anonymous visitors)
-    history_by_ip: Dict[str, int] = {}
-    if ip_addresses:
+    # Bulk-fetch history counts by fingerprint (Senior repeat check)
+    history_by_fingerprint: Dict[str, int] = {}
+    fingerprints = [s[0].visitor_fingerprint for s in sessions if s[0].visitor_fingerprint]
+    if fingerprints:
         counts = (
-            db.query(ChatSession.ip_address, func.count(ChatSession.id))
-            .filter(ChatSession.ip_address.in_(ip_addresses), ChatSession.is_deleted == False)
-            .group_by(ChatSession.ip_address)
+            db.query(ChatSession.visitor_fingerprint, func.count(ChatSession.id))
+            .filter(ChatSession.visitor_fingerprint.in_(fingerprints), ChatSession.is_deleted == False)
+            .group_by(ChatSession.visitor_fingerprint)
             .all()
         )
-        history_by_ip = {ip: max(0, count - 1) for ip, count in counts}
+        history_by_fingerprint = {fp: max(0, count - 1) for fp, count in counts}
 
     results = []
     for row in sessions:
@@ -173,8 +180,8 @@ def _assemble_items(sessions, db: Session) -> List[LiveConversationItem]:
         past_count = 0
         if s.lead_id:
             past_count = history_by_lead.get(s.lead_id, 0)
-        elif s.ip_address:
-            past_count = history_by_ip.get(s.ip_address, 0)
+        elif s.visitor_fingerprint:
+            past_count = history_by_fingerprint.get(s.visitor_fingerprint, 0)
 
         results.append(
             LiveConversationItem.model_validate(
@@ -191,6 +198,12 @@ def _assemble_items(sessions, db: Session) -> List[LiveConversationItem]:
                     "is_locked": s.is_locked,
                     "lead_name": lead.name if lead else "Visitor",
                     "lead_company": lead.company if lead else None,
+                    "initial_ip": s.initial_ip,
+                    "country": s.country,
+                    "city": s.city,
+                    "browser": s.browser,
+                    "os": s.os,
+                    "device_type": s.device_type,
                 }
             )
         )
@@ -210,7 +223,7 @@ def list_live_conversations(
     Agents can see every chatbot conversation in one view.
     """
     q = _build_conversation_query(
-        db, current_user.tenant_id, only_active=False,
+        db, current_user.tenant_id, only_active=True,
         status_filter=None, date_from=None, date_to=None
     )
     sessions = q.all()
@@ -293,6 +306,12 @@ def get_conversation_detail(
             "lead_name": lead.name if lead else "Visitor",
             "lead_company": lead.company if lead else None,
             "lead_email": lead.email if lead else None,
+            "initial_ip": s.initial_ip,
+            "country": s.country,
+            "city": s.city,
+            "browser": s.browser,
+            "os": s.os,
+            "device_type": s.device_type,
         }
     )
 

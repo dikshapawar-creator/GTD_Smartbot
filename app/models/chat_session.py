@@ -36,11 +36,22 @@ class ChatSession(Base):
     user_id = Column(String(255), nullable=True)
     lead_id = Column(String(36),  nullable=True, index=True)
 
-    # IP & Geolocation
-    ip_address = Column(String(45), nullable=True)
+    # IP & Identity Tracking
+    initial_ip = Column(String(45), nullable=True) # Static per session
+    last_seen_ip = Column(String(45), nullable=True) # Tracks mobile rotation
+    last_seen_at = Column(DateTime, nullable=True)
+    visitor_fingerprint = Column(String(12), nullable=True, index=True) # Device identity
+    
+    # Geolocation
     country = Column(String(100), nullable=True)
     city = Column(String(100), nullable=True)
     timezone = Column(String(100), nullable=True, default="UTC")
+
+    # Client Metadata
+    user_agent = Column(String(500), nullable=True)
+    browser = Column(String(100), nullable=True)
+    os = Column(String(100), nullable=True)
+    device_type = Column(String(50), nullable=True)
 
     # Lifecycle State
     session_status = Column(
@@ -94,6 +105,8 @@ class ChatSession(Base):
         Index("ix_sessions_tenant_deleted", "tenant_id", "is_deleted"),
         # ── Repeat visitor aggregation: lead history lookup by tenant
         Index("ix_sessions_tenant_lead", "tenant_id", "lead_id"),
+        # Fingerprint lookup for analytics
+        Index("ix_sessions_tenant_fingerprint", "tenant_id", "visitor_fingerprint"),
         # ── Mode filter for intervention dashboard
         Index("ix_sessions_active_mode", "session_status", "conversation_mode", "is_deleted"),
         # ── Agent workload queries

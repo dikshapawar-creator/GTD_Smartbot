@@ -19,9 +19,13 @@ def handle_greeting(db: Session, chat_session: ChatSession) -> dict:
     # Fallback to hardcoded if not in DB (safety)
     response_text = config.response_text if config else "Hello! Welcome to GTD Service. How can I assist you today?"
     
+    from app.services import session_service
     if not chat_session.has_greeted:
         chat_session.has_greeted = True
         db.commit()
+        
+        # Save greeting as bot message so it shows up in history & metrics
+        session_service.save_message(db, chat_session, response_text, "bot")
         
         logger.info({"event": "greeting_sent", "session_id": chat_session.session_id, "first_time": True})
         return {"type": ResponseType.MESSAGE, "message": response_text}

@@ -56,7 +56,10 @@ def lookup_ip_geo(ip_address: str) -> Tuple[str, str, str]:
             "ip": ip_address,
             "reason": "internal_or_invalid_ip"
         })
-        return ("Unknown", "Unknown", "UTC")
+        # For local development, returning a clearer label than "Unknown"
+        if ip_address in ("127.0.0.1", "::1"):
+            return ("Local Develop", "Localhost", "UTC")
+        return ("Internal Network", "Private IP", "UTC")
 
     url = settings.IP_API_URL.format(ip=ip_address)
     try:

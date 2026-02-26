@@ -40,9 +40,14 @@ def create_session(
     country: str,
     city: str,
     timezone_str: str,
-    tenant_id: int = 2,
+    user_agent: str = "Unknown",
+    browser: str = "Unknown",
+    os_name: str = "Unknown",
+    device_type: str = "Desktop",
+    fingerprint: Optional[str] = None,
+    tenant_id: int = 1,
 ) -> ChatSession:
-    """Creates a new session with activity tracking initialized."""
+    """Creates a new session with senior IP & metadata tracking."""
     session_id = str(uuid4())
     now_utc = _now_utc()
     now_local = _to_local(now_utc, timezone_str)
@@ -50,7 +55,14 @@ def create_session(
     chat_session = ChatSession(
         session_id=session_id,
         tenant_id=tenant_id,
-        ip_address=ip_address,
+        initial_ip=ip_address,
+        last_seen_ip=ip_address,
+        last_seen_at=now_utc,
+        visitor_fingerprint=fingerprint,
+        user_agent=user_agent,
+        browser=browser,
+        os=os_name,
+        device_type=device_type,
         country=country,
         city=city,
         timezone=timezone_str,
