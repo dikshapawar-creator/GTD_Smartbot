@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str
     SECRET_KEY: str = "your-secret-key-here"
     DEBUG: bool = True
+    IP_API_URL: str = "https://ipapi.co/{ip}/json/"
 
     # JWT Settings
     JWT_SECRET_KEY: str = "super-secret-key-change-me-in-production"
