@@ -4,6 +4,13 @@ from typing import List, Union, Any
 import json
 
 
+import os
+
+# Calculate the path to the .env file (root of the repo)
+# config.py is in app/core/, so root is ../../
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ENV_PATH = os.path.join(BASE_DIR, ".env")
+
 class Settings(BaseSettings):
     APP_NAME: str = "GTD Service Intelligence"
     DATABASE_URL: str
@@ -38,7 +45,7 @@ class Settings(BaseSettings):
     CORS_ORIGIN_REGEX: str = r"https://gtt-smartbot-frontend-.*\.vercel\.app"
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=ENV_PATH,
         env_file_encoding="utf-8",
         extra="ignore"
     )
