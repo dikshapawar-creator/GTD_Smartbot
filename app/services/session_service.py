@@ -191,9 +191,8 @@ def save_message(
 
 def trigger_agent_takeover(db: Session, session_id: str, lead_id: Optional[str] = None) -> bool:
     """
-    Initiate handover logic — just updates linkage, UI handles mode switch.
-    In a real system, this might set a 'WAITING_FOR_AGENT' mode if we added one,
-    but we keep it lean with BOT -> HUMAN transition.
+    Force transition to HUMAN mode and link lead.
+    Sets agent_joined=True so the bot completely stops replying.
     """
     chat_session = (
         db.query(ChatSession)
@@ -205,8 +204,13 @@ def trigger_agent_takeover(db: Session, session_id: str, lead_id: Optional[str] 
         .first()
     )
     if chat_session:
-        # We don't switch to HUMAN yet, just link the lead.
-        # The agent clicks "Intervene" to switch mode.
+        # 🔥 Hard Takeover: Disable Bot, Enable Human
+        chat_session.conversation_mode = ConversationMode.HUMAN
+        chat_session.agent_joined = True
+        chat_session.status = "human_required"
+        chat_session.last_activity_utc = _now_utc()
+        chat_session.updated_at = _now_utc()
+        
         if lead_id:
             chat_session.lead_id = lead_id
         
@@ -218,7 +222,7 @@ def trigger_agent_takeover(db: Session, session_id: str, lead_id: Optional[str] 
             "An agent has been notified and will review your request.",
             "system",
         )
-        logger.info(f"Handover initiated for session {session_id}")
+        logger.info(f"Relational link finalized: session {session_id} -> lead {lead_id}")
         return True
     return False
 

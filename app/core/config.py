@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "your-secret-key-here"
     DEBUG: bool = True
     IP_API_URL: str = "https://ipapi.co/{ip}/json/"
+    ADMIN_SETUP_TOKEN: str
+    DEFAULT_TENANT_ID: int = 2
 
     # JWT Settings
     JWT_SECRET_KEY: str = "super-secret-key-change-me-in-production"
@@ -22,30 +24,11 @@ class Settings(BaseSettings):
     SESSION_EXPIRY_MINUTES: int = 60
 
     # CORS
-    # We use Any to prevent Pydantic from crashing on internal JSON parsing
-    # from environment variables. The validator will handle conversion.
-    CORS_ORIGINS: Any = [
-        "http://localhost:3000",
-        "http://localhost:8000",
-        "https://gtt-smartbot-frontend.vercel.app",
-    ]
+    # Defined as strict string to bypass Pydantic V2 list JSON parsing errors from .env
+    CORS_ORIGINS: str = (
+        "http://localhost:3000,http://localhost:8000,https://gtt-smartbot-frontend.vercel.app"
+    )
     CORS_ORIGIN_REGEX: str = r"https://gtt-smartbot-frontend-.*\.vercel\.app"
-
-    @field_validator("CORS_ORIGINS", mode="before")
-    @classmethod
-    def assemble_cors_origins(cls, v: Any) -> List[str]:
-        if isinstance(v, str):
-            # Handle JSON array string
-            if v.startswith("[") and v.endswith("]"):
-                try:
-                    return json.loads(v)
-                except json.JSONDecodeError:
-                    pass
-            # Handle comma-separated string
-            return [i.strip() for i in v.split(",") if i.strip()]
-        if isinstance(v, list):
-            return v
-        return ["http://localhost:3000"]
 
     model_config = SettingsConfigDict(
         env_file=".env",

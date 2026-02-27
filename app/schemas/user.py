@@ -9,7 +9,7 @@ class UserBase(BaseModel):
 
 class UserCreate(UserBase):
     password: str
-    role_name: str # administrator, admin, sales
+    role_name: str
 
     @field_validator("password")
     @classmethod
@@ -24,6 +24,7 @@ class UserUpdate(BaseModel):
     email: Optional[EmailStr] = None
     password: Optional[str] = None
     is_active: Optional[bool] = None
+    role_name: Optional[str] = None
 
 class RoleResponse(BaseModel):
     id: int

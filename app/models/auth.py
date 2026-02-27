@@ -20,6 +20,7 @@ class Role(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(50), unique=True, nullable=False)
+    description = Column(String(255), nullable=True)
     level = Column(Integer, nullable=False) # 3: administrator, 2: admin, 1: sales
     created_at = Column(DateTime, server_default=text("GETDATE()"))
 

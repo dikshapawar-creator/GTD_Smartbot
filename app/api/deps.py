@@ -2,7 +2,7 @@ from typing import Generator
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import jwt
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from app.core.config import settings
 from app.core.dependencies import get_db
 from app.schemas.auth import TokenData
@@ -40,7 +40,7 @@ async def get_current_user(
     except Exception:
         raise credentials_exception
         
-    user = db.query(User).filter(User.id == int(user_id)).first()
+    user = db.query(User).options(joinedload(User.role)).filter(User.id == int(user_id)).first()
     if user is None:
         raise credentials_exception
         

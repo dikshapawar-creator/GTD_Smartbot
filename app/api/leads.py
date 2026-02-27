@@ -27,7 +27,7 @@ router = APIRouter(prefix="/leads", tags=["Leads Admin"])
 
 
 @router.post("/submit", summary="Submit chatbot lead form")
-def submit_lead(
+async def submit_lead(
     request: Request,
     lead_req: LeadSubmitRequest,
     db: Session = Depends(get_db)
@@ -38,6 +38,8 @@ def submit_lead(
     """
     from app.services import lead_service, session_service
     from app.core.config import settings as app_settings
+    from app.core.socket_manager import socket_manager
+    from app.api.live_chat import _assemble_items
 
     try:
         # 1. Process Lead (Create or Update Duplicate)
@@ -47,7 +49,20 @@ def submit_lead(
         session_id = request.cookies.get(app_settings.SESSION_COOKIE_NAME)
         takeover_triggered = False
         if session_id:
+            # 🔥 Relational Linkage
             takeover_triggered = session_service.trigger_agent_takeover(db, session_id, str(lead.id))
+            
+            # 🔥 Broadcast SESSION_UPDATED to Dashboard (Real-time CRM Sync)
+            chat_session = db.query(ChatSession).filter(ChatSession.session_id == session_id).first()
+            if chat_session:
+                session_item = _assemble_items([(chat_session, None)], db)[0]
+                await socket_manager.broadcast_event(
+                    "SESSION_UPDATED", 
+                    session_item.model_dump(mode="json")
+                )
+                logger.info(f"Broadcasted takeover for session {session_id} to leads {lead.id}")
+        else:
+            logger.warning("No session_id cookie found during lead submission")
 
         return {
             "success": True,

@@ -110,6 +110,7 @@ def _build_conversation_query(
         .outerjoin(User, ChatSession.assigned_agent_id == User.id)
         .filter(
             ChatSession.tenant_id == tenant_id,          # ← TENANT ISOLATION
+            ChatSession.is_active == True,               # ← DASHBOARD VISIBILITY
             ChatSession.is_deleted == False,              # ← SOFT DELETE GUARD
         )
     )
@@ -129,7 +130,7 @@ def _build_conversation_query(
     if date_to:
         q = q.filter(ChatSession.last_activity_utc <= date_to)
 
-    return q.order_by(ChatSession.last_activity_utc.desc())
+    return q.order_by(ChatSession.started_at_utc.desc())
 
 
 def _assemble_items(sessions, db: Session) -> List[LiveConversationItem]:
@@ -196,7 +197,7 @@ def _assemble_items(sessions, db: Session) -> List[LiveConversationItem]:
                     "created_at": s.started_at_utc,
                     "last_message_at": s.last_activity_utc,
                     "is_locked": s.is_locked,
-                    "lead_name": lead.name if lead else "Visitor",
+                    "lead_name": lead.name if lead else (f"{s.initial_ip} ({s.country})" if s.initial_ip and s.country else "Visitor"),
                     "lead_company": lead.company if lead else None,
                     "initial_ip": s.initial_ip,
                     "country": s.country,

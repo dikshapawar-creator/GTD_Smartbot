@@ -9,8 +9,11 @@ logger = logging.getLogger(__name__)
 # The DSN should be correctly formatted in .env (e.g. mssql+pyodbc://...)
 engine = create_engine(
     settings.DATABASE_URL,
-    pool_pre_ping=True,
-    pool_recycle=3600,
+    pool_pre_ping=True,      # Checks connection health before use
+    pool_recycle=1800,       # Recycle connections every 30 mins
+    pool_size=10,            # Maintain a base pool of 10 connections
+    max_overflow=20,         # Allow up to 20 additional "burst" connections
+    pool_timeout=30,         # Wait up to 30s before timing out
     echo=False
 )
 

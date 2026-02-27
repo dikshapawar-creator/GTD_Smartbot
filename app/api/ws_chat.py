@@ -176,6 +176,19 @@ async def websocket_chat(
 
             if role == "client":
                 _save_ws_message(db, session_id, text, "user", user_tenant_id)
+                
+                # 🔥 Broadcast to CRM Dashboard
+                from app.core.socket_manager import socket_manager
+                await socket_manager.broadcast_event(
+                    "NEW_MESSAGE",
+                    {
+                        "session_id": session_id,
+                        "message": text,
+                        "sender": "user",
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+                )
+
                 await manager.send_to_agent(session_id, {
                     "type": "message",
                     "message": text,
@@ -184,6 +197,19 @@ async def websocket_chat(
 
             elif role == "agent":
                 _save_ws_message(db, session_id, text, "agent", user_tenant_id)
+                
+                # 🔥 Broadcast to CRM Dashboard
+                from app.core.socket_manager import socket_manager
+                await socket_manager.broadcast_event(
+                    "NEW_MESSAGE",
+                    {
+                        "session_id": session_id,
+                        "message": text,
+                        "sender": "agent",
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+                )
+
                 await manager.send_to_client(session_id, {
                     "type": "message",
                     "message": text,
@@ -199,4 +225,26 @@ async def websocket_chat(
             manager.disconnect_client(session_id)
         elif role == "agent":
             manager.disconnect_agent(session_id)
+            
+            # 🚨 REVERT STATUS ON DISCONNECT
+            # If agent leaves and no one else is handling (simple manager case)
+            chat_session = db.query(ChatSession).filter(ChatSession.session_id == session_id).first()
+            if chat_session and chat_session.conversation_mode == ConversationMode.HUMAN:
+                # We only revert if they didn't explicitly close it (SessionStatus would be CLOSED)
+                if chat_session.session_status == SessionStatus.ACTIVE:
+                    chat_session.agent_joined = False
+                    # We might NOT want to revert to BOT immediately if we expect another agent to pick it up,
+                    # but for this logic, we'll mark as agent inactive so bot can resume if needed.
+                    db.commit()
+                    
+                    # Broadcast update to dashboard
+                    from app.core.socket_manager import socket_manager
+                    from app.api.live_chat import _assemble_items
+                    session_item = _assemble_items([(chat_session, None)], db)[0]
+                    import asyncio
+                    asyncio.create_task(socket_manager.broadcast_event(
+                        "SESSION_UPDATED",
+                        session_item.model_dump(mode="json")
+                    ))
+
         db.close()

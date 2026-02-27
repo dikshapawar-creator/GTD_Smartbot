@@ -86,3 +86,40 @@ class UserService:
             actor_user_id=creator.id, target_user_id=target.id
         )
         return True
+
+    @staticmethod
+    def update_user(db: Session, user_id: int, user_in: any, creator: User) -> User:
+        """
+        Partial update for users.
+        - Hierarchical checks for role changes.
+        """
+        target = db.query(User).filter(User.id == user_id, User.tenant_id == creator.tenant_id).first()
+        if not target:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # 1. Role Change Validation
+        if user_in.role_name:
+            target_role = db.query(Role).filter(Role.name == user_in.role_name).first()
+            if not target_role:
+                raise HTTPException(status_code=400, detail="Invalid role")
+            
+            # Hierarchy: Admin (2) cannot create/promote to Admin (2) or Administrator (3)
+            if creator.role.level == 2 and target_role.level >= 2:
+                 raise HTTPException(status_code=403, detail="Admins can only assign Sales roles.")
+            
+            target.role_id = target_role.id
+
+        # 2. Other Fields
+        if user_in.is_active is not None:
+            if target.id == creator.id and user_in.is_active is False:
+                raise HTTPException(status_code=400, detail="Cannot deactivate self")
+            target.is_active = user_in.is_active
+
+        db.commit()
+        db.refresh(target)
+        
+        AuditService.log_action(
+            db, "USER_UPDATED", creator.tenant_id,
+            actor_user_id=creator.id, target_user_id=target.id
+        )
+        return target

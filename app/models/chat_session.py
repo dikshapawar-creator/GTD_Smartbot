@@ -7,6 +7,8 @@ import uuid
 from sqlalchemy import (
     Column, String, DateTime, Boolean, BigInteger, Integer, Index, ForeignKey, Enum
 )
+from sqlalchemy.orm import relationship
+from sqlalchemy.dialects.mssql import UNIQUEIDENTIFIER
 from app.db.session import Base
 import enum
 
@@ -34,7 +36,10 @@ class ChatSession(Base):
 
     # Ownership & Linkage
     user_id = Column(String(255), nullable=True)
-    lead_id = Column(String(36),  nullable=True, index=True)
+    lead_id = Column(UNIQUEIDENTIFIER, ForeignKey("leads.id"), nullable=True, index=True)
+
+    # Relationships
+    lead = relationship("Lead", back_populates="chat_sessions")
 
     # IP & Identity Tracking
     initial_ip = Column(String(45), nullable=True) # Static per session
@@ -75,6 +80,7 @@ class ChatSession(Base):
     last_activity_utc = Column(DateTime, nullable=False, index=True)
     ended_at_utc = Column(DateTime, nullable=True)
     ended_at_local = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, nullable=True)
     
     # Agent Assignment
     assigned_agent_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)

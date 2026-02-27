@@ -9,6 +9,7 @@ from app.api.leads import router as leads_router
 from app.api.intents import router as intents_router
 from app.api.auth import router as auth_router
 from app.api.users import router as users_router
+from app.api.roles import router as roles_router
 from app.api.admin import router as admin_router
 from app.api.sales import router as sales_router
 from app.api.live_chat import router as live_chat_router
@@ -65,7 +66,7 @@ def create_app() -> FastAPI:
     # regex used to support Vercel dynamic preview URLs
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.CORS_ORIGINS,
+        allow_origins=[origin.strip() for origin in settings.CORS_ORIGINS.split(",") if origin.strip()],
         allow_origin_regex=settings.CORS_ORIGIN_REGEX,
         allow_credentials=True,
         allow_methods=["*"],
@@ -76,6 +77,7 @@ def create_app() -> FastAPI:
     # ── API Routes (Consolidated) ───────────────────────────────────
     app.include_router(auth_router)
     app.include_router(users_router)
+    app.include_router(roles_router)
     app.include_router(chatbot_router)
     app.include_router(leads_router)
     app.include_router(live_chat_router)

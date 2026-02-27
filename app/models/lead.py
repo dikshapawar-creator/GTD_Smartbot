@@ -82,6 +82,7 @@ class Lead(Base):
 
     # Relationships
     history = relationship("LeadStatusHistory", back_populates="lead", cascade="all, delete-orphan")
+    chat_sessions = relationship("ChatSession", back_populates="lead")
 
 
 class LeadStatusHistory(Base):
