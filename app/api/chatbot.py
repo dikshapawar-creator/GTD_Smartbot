@@ -39,7 +39,7 @@ async def initialize_session(request: Request, response: Response, db: Session =
         # Verify session is truly active and exists
         if active_session and active_session.session_status == SessionStatus.ACTIVE:
             return {
-                "session_token": active_session.session_id,
+                "session_token": str(active_session.session_uuid),
                 "message": "Welcome back to GTD Service! How can I assist with your trade intelligence today?",
                 "state": active_session.chat_state,
                 "type": "CTA",
@@ -95,7 +95,7 @@ async def initialize_session(request: Request, response: Response, db: Session =
     )
 
     return {
-        "session_token": new_session.session_id,
+        "session_token": str(new_session.session_uuid),
         "message": greeting_res["message"],
         "state": ChatState.START,
         "type": "CTA",
@@ -161,7 +161,7 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
         )
 
         return {
-            "sessionId": session_id,
+            "sessionId": str(active_session.session_uuid),
             "message": "", 
             "type": ResponseType.MESSAGE,
             "state": active_session.chat_state,
@@ -210,7 +210,7 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
         )
         
         return {
-            "sessionId": session_id,
+            "sessionId": str(active_session.session_uuid),
             "message": bot_msg,
             "state": active_session.chat_state,
             "conversation_status": active_session.conversation_mode
@@ -260,7 +260,8 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
                      phone="Pending",
                      company="Pending",
                      status="IN_PROGRESS",
-                     source="chatbot"
+                     source="chatbot",
+                     tenant_id=active_session.tenant_id
                  )
                  db.add(lead)
                  db.flush()
@@ -330,7 +331,7 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
         )
 
     return {
-        "sessionId": session_id,
+        "sessionId": str(active_session.session_uuid),
         "message": bot_msg,
         "state": active_session.chat_state,
         "conversation_status": active_session.conversation_mode
@@ -361,7 +362,7 @@ async def get_chat_history(request: Request, db: Session = Depends(get_db)):
     history = []
     for m in messages:
         history.append({
-            "sessionId": session_id,
+            "sessionId": str(active_session.session_uuid),
             "message": m.message_text,
             "role": m.message_type, # Frontend expects 'role' for UI
             "state": active_session.chat_state, # Defaulting to current state

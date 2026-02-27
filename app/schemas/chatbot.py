@@ -77,7 +77,7 @@ class ChatMessageResponse(BaseModel):
 
 class LeadResponse(BaseModel):
     id: UUID
-    name: str
+    name: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
     company: Optional[str] = None

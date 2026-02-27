@@ -1,4 +1,4 @@
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List, Union, Any
 import json
@@ -16,8 +16,15 @@ class Settings(BaseSettings):
     # JWT Settings
     JWT_SECRET_KEY: str = "super-secret-key-change-me-in-production"
     JWT_ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440 # 24 hours for better session persistence
     REFRESH_TOKEN_EXPIRE_DAYS: int = 30
+
+    @model_validator(mode='after')
+    def sync_secrets(self) -> 'Settings':
+        # Ensure JWT_SECRET_KEY matches SECRET_KEY if provided in .env
+        if self.SECRET_KEY != "your-secret-key-here":
+            self.JWT_SECRET_KEY = self.SECRET_KEY
+        return self
 
     # Session Settings
     SESSION_COOKIE_NAME: str = "chat_session"

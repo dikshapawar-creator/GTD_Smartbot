@@ -36,27 +36,28 @@ def _save_ws_message(
     """Persist a WebSocket message to chat_messages with tenant/session scoping."""
     now_utc = datetime.utcnow()
     
-    # We use session_id directly as it's a UUID, but we update the session last_activity
-    msg = ChatMessage(
-        session_id=session_id,
-        message_type=sender_type,
-        message_text=text,
-        created_at_utc=now_utc,
-        created_at_local=now_utc, # Fallback if local not available
-    )
-    db.add(msg)
-
     # Update session activity — scope by tenant_id for isolation safety
     chat_session = (
         db.query(ChatSession)
         .filter(
-            ChatSession.session_id == session_id,
+            ChatSession.session_uuid == session_id,
             ChatSession.tenant_id == tenant_id,
             ChatSession.is_deleted == False
         )
         .first()
     )
+    
     if chat_session:
+        # We must use the REAL internal session_id for the FK constraint
+        msg = ChatMessage(
+            session_id=chat_session.session_id,
+            message_type=sender_type,
+            message_text=text,
+            created_at_utc=now_utc,
+            created_at_local=now_utc, # Fallback if local not available
+        )
+        db.add(msg)
+
         chat_session.last_activity_utc = now_utc
         chat_session.total_messages += 1
 
@@ -89,7 +90,7 @@ async def websocket_chat(
             chat_session = (
                 db.query(ChatSession)
                 .filter(
-                    ChatSession.session_id == session_id, 
+                    ChatSession.session_uuid == session_id, 
                     ChatSession.session_status == SessionStatus.ACTIVE, 
                     ChatSession.is_deleted == False
                 )
@@ -128,7 +129,7 @@ async def websocket_chat(
             chat_session = (
                 db.query(ChatSession)
                 .filter(
-                    ChatSession.session_id == session_id,
+                    ChatSession.session_uuid == session_id,
                     ChatSession.tenant_id == user_tenant_id, # ← TENANT ISOLATION
                     ChatSession.session_status == SessionStatus.ACTIVE,
                     ChatSession.is_deleted == False
@@ -189,11 +190,41 @@ async def websocket_chat(
                     }
                 )
 
-                await manager.send_to_agent(session_id, {
-                    "type": "message",
-                    "message": text,
-                    "sender": "user",
-                })
+                # ✅ ALWAYS re-fetch session mode from DB to avoid stale cache
+                db.expire_all()  # Force SQLAlchemy to reload from DB
+                fresh_session = db.query(ChatSession).filter(
+                    ChatSession.session_uuid == session_id
+                ).first()
+
+                if fresh_session and fresh_session.conversation_mode == ConversationMode.HUMAN:
+                    # Agent is handling — forward to agent WS
+                    await manager.send_to_agent(session_id, {
+                        "type": "message",
+                        "message": text,
+                        "sender": "user",
+                    })
+                else:
+                    # Bot is handling — call chatbot service directly
+                    try:
+                        from app.services.chatbot import ChatbotService
+                        bot_response = ChatbotService.handle_message(
+                            db=db,
+                            chat_session=fresh_session,
+                            user_message=text
+                        )
+                        reply_text = bot_response.get("message", "")
+                        if reply_text:
+                            await websocket.send_json({
+                                "type": "message",
+                                "message": reply_text,
+                                "sender": "bot",
+                                "state": bot_response.get("state"),
+                                "type_hint": bot_response.get("type"),
+                                "cta_label": bot_response.get("cta_label"),
+                                "action": bot_response.get("action"),
+                            })
+                    except Exception as bot_err:
+                        logger.error(f"Bot response error for session {session_id}: {bot_err}")
 
             elif role == "agent":
                 _save_ws_message(db, session_id, text, "agent", user_tenant_id)
@@ -227,24 +258,36 @@ async def websocket_chat(
             manager.disconnect_agent(session_id)
             
             # 🚨 REVERT STATUS ON DISCONNECT
-            # If agent leaves and no one else is handling (simple manager case)
-            chat_session = db.query(ChatSession).filter(ChatSession.session_id == session_id).first()
-            if chat_session and chat_session.conversation_mode == ConversationMode.HUMAN:
-                # We only revert if they didn't explicitly close it (SessionStatus would be CLOSED)
-                if chat_session.session_status == SessionStatus.ACTIVE:
-                    chat_session.agent_joined = False
-                    # We might NOT want to revert to BOT immediately if we expect another agent to pick it up,
-                    # but for this logic, we'll mark as agent inactive so bot can resume if needed.
-                    db.commit()
-                    
-                    # Broadcast update to dashboard
-                    from app.core.socket_manager import socket_manager
-                    from app.api.live_chat import _assemble_items
-                    session_item = _assemble_items([(chat_session, None)], db)[0]
-                    import asyncio
-                    asyncio.create_task(socket_manager.broadcast_event(
-                        "SESSION_UPDATED",
-                        session_item.model_dump(mode="json")
-                    ))
+            chat_session = db.query(ChatSession).filter(ChatSession.session_uuid == session_id).first()
+            if chat_session and chat_session.session_status == SessionStatus.ACTIVE:
+                # ✅ Switch mode back to BOT so messages get routed to chatbot
+                chat_session.conversation_mode = ConversationMode.BOT
+                chat_session.agent_joined = False
+                chat_session.assigned_agent_id = None
+                db.commit()
+
+                # Notify client widget that bot has resumed
+                await manager.send_to_client(session_id, {
+                    "type": "system",
+                    "message": "The agent has left. The AI assistant has resumed.",
+                    "sender": "system",
+                    "mode": "BOT",
+                })
+                _save_ws_message(
+                    db, session_id,
+                    "The agent has left. The AI assistant has resumed.",
+                    "system",
+                    chat_session.tenant_id
+                )
+
+                # Broadcast update to dashboard
+                from app.core.socket_manager import socket_manager
+                from app.api.live_chat import _assemble_items
+                session_item = _assemble_items([(chat_session, None)], db)[0]
+                import asyncio
+                asyncio.create_task(socket_manager.broadcast_event(
+                    "SESSION_UPDATED",
+                    session_item.model_dump(mode="json")
+                ))
 
         db.close()

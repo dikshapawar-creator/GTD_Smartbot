@@ -9,6 +9,9 @@ from uuid import UUID
 from datetime import datetime, timezone
 
 from app.core.dependencies import get_db
+from app.core.config import settings
+from app.models.auth import User
+from app.api.deps import require_role
 from app.models.lead import Lead, LeadStatusHistory, LeadStatus
 from app.models.chat_session import ChatSession, SessionStatus, ConversationMode
 
@@ -42,25 +45,37 @@ async def submit_lead(
     from app.api.live_chat import _assemble_items
 
     try:
-        # 1. Process Lead (Create or Update Duplicate)
-        lead, is_duplicate = lead_service.create_or_update_lead(db, lead_req, source="chatbot")
+        # 1. Get Session & Tenant (if possible)
+        session_id = request.cookies.get(settings.SESSION_COOKIE_NAME)
+        chat_session = None
+        current_tenant_id = 1 # Default
 
-        # 2. Trigger Agent Takeover if session exists
-        session_id = request.cookies.get(app_settings.SESSION_COOKIE_NAME)
-        takeover_triggered = False
         if session_id:
+            chat_session = db.query(ChatSession).filter(ChatSession.session_uuid == session_id).first()
+            if chat_session:
+                current_tenant_id = chat_session.tenant_id
+
+        # 2. Process Lead (Create or Update Duplicate)
+        lead, is_duplicate = lead_service.create_or_update_lead(
+            db, 
+            lead_req, 
+            tenant_id=current_tenant_id, 
+            source="chatbot"
+        )
+
+        # 3. Trigger Agent Takeover if session exists
+        takeover_triggered = False
+        if chat_session:
             # 🔥 Relational Linkage
             takeover_triggered = session_service.trigger_agent_takeover(db, session_id, str(lead.id))
             
             # 🔥 Broadcast SESSION_UPDATED to Dashboard (Real-time CRM Sync)
-            chat_session = db.query(ChatSession).filter(ChatSession.session_id == session_id).first()
-            if chat_session:
-                session_item = _assemble_items([(chat_session, None)], db)[0]
-                await socket_manager.broadcast_event(
-                    "SESSION_UPDATED", 
-                    session_item.model_dump(mode="json")
-                )
-                logger.info(f"Broadcasted takeover for session {session_id} to leads {lead.id}")
+            session_item = _assemble_items([(chat_session, None)], db)[0]
+            await socket_manager.broadcast_event(
+                "SESSION_UPDATED", 
+                session_item.model_dump(mode="json")
+            )
+            logger.info(f"Broadcasted takeover for session {session_id} to leads {lead.id}")
         else:
             logger.warning("No session_id cookie found during lead submission")
 
@@ -88,19 +103,24 @@ def get_leads(
     skip: int = 0,
     limit: int = 50,
     status: Optional[LeadStatus] = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(2))
 ):
     """
     Retrieve leads with pagination and optional status filter.
     Pagination limit is capped at 100 to prevent system overload.
     """
+    logger.info(f"Leads: Fetching for user {current_user.email} | Tenant {current_user.tenant_id} | Status: {status}")
+    
     if limit > 100:
         limit = 100
         
-    query = db.query(Lead).filter(Lead.is_deleted == False)
+    query = db.query(Lead).filter(
+        Lead.tenant_id == current_user.tenant_id, # ← TENANT ISOLATION
+        Lead.is_deleted == False
+    )
 
     if status:
-
         query = query.filter(Lead.status == status)
     
     return (
@@ -113,8 +133,16 @@ def get_leads(
 
 
 @router.get("/{id}", response_model=LeadResponse, summary="Get lead by ID")
-def get_lead(id: UUID, db: Session = Depends(get_db)):
-    lead = db.query(Lead).filter(Lead.id == id, Lead.is_deleted == False).first()
+def get_lead(
+    id: UUID, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(2))
+):
+    lead = db.query(Lead).filter(
+        Lead.id == id, 
+        Lead.tenant_id == current_user.tenant_id,
+        Lead.is_deleted == False
+    ).first()
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found")
     return lead
@@ -125,7 +153,8 @@ def get_lead(id: UUID, db: Session = Depends(get_db)):
 def update_lead_status(
     id: UUID, 
     update_req: StatusUpdateRequest, 
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(2))
 ):
     """
     Update lead status using controlled lifecycle transitions.
@@ -135,9 +164,10 @@ def update_lead_status(
             db, 
             str(id), 
             update_req.status, 
-            update_req.changed_by,
-            update_req.source,
-            update_req.version
+            tenant_id=current_user.tenant_id,
+            changed_by=update_req.changed_by,
+            source=update_req.source,
+            expected_version=update_req.version
         )
         return updated_lead
     except ValueError as e:
@@ -146,18 +176,26 @@ def update_lead_status(
 
 
 @router.get("/{id}/history", response_model=List[LeadStatusHistoryResponse], summary="Get lead status audit trail")
-def get_lead_history(id: UUID, db: Session = Depends(get_db)):
+def get_lead_history(
+    id: UUID, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(2))
+):
     """
     Retrieve history of status changes for a lead.
     """
-    return lead_service.get_lead_history(db, str(id))
+    return lead_service.get_lead_history(db, str(id), tenant_id=current_user.tenant_id)
 
 
 @router.get(
     "/{leadId}/conversations",
     summary="Get conversations for a lead"
 )
-def get_conversations(leadId: UUID, db: Session = Depends(get_db)):
+def get_conversations(
+    leadId: UUID, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(2))
+):
     """
     Retrieve all messages associated with a lead by joining sessions.
     """
@@ -174,12 +212,18 @@ def get_conversations(leadId: UUID, db: Session = Depends(get_db)):
 
 
 @router.delete("/{id}", summary="Soft delete a lead")
-def delete_lead(id: UUID, db: Session = Depends(get_db)):
+def delete_lead(
+    id: UUID, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(2))
+):
     """
     Soft-delete a lead by marking is_deleted = True.
     """
-    success = lead_service.soft_delete_lead(db, str(id))
+    success = lead_service.soft_delete_lead(db, str(id), tenant_id=current_user.tenant_id)
     if not success:
         raise HTTPException(status_code=404, detail="Lead not found")
     return {"status": "success", "message": "Lead soft-deleted"}
+
+
 

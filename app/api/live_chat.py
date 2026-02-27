@@ -187,7 +187,7 @@ def _assemble_items(sessions, db: Session) -> List[LiveConversationItem]:
         results.append(
             LiveConversationItem.model_validate(
                 {
-                    "session_id": s.session_id,
+                    "session_id": str(s.session_uuid), # Use UUID for external referencing
                     "session_status": s.session_status,
                     "current_mode": s.conversation_mode,
                     "agent_name": agent_name,
@@ -280,7 +280,7 @@ def get_conversation_detail(
         db.query(ChatSession, User.full_name.label("agent_name"))
         .outerjoin(User, ChatSession.assigned_agent_id == User.id)
         .filter(
-            ChatSession.session_id == session_id,
+            ChatSession.session_uuid == session_id,
             ChatSession.tenant_id == current_user.tenant_id,
             ChatSession.is_deleted == False,
         )
@@ -334,9 +334,9 @@ def get_conversation_messages(
     """
     # ── Ownership / Tenant Check ───────────────────────────────────────
     session_exists = (
-        db.query(ChatSession.id)
+        db.query(ChatSession.session_id)
         .filter(
-            ChatSession.session_id == session_id,
+            ChatSession.session_uuid == session_id,
             ChatSession.tenant_id == current_user.tenant_id,  # ← CRITICAL
             ChatSession.is_deleted == False,
         )
@@ -348,10 +348,12 @@ def get_conversation_messages(
             detail="Session not found",
         )
 
+    internal_session_id = session_exists[0]
+
     # ── Paginated Query ───────────────────────────────────────────────
     q = (
         db.query(ChatMessage)
-        .filter(ChatMessage.session_id == session_id)
+        .filter(ChatMessage.session_id == internal_session_id)
         .order_by(ChatMessage.created_at_utc.asc())
     )
     total = q.count()
@@ -382,7 +384,7 @@ def intervene_in_conversation(
     stmt = (
         update(ChatSession)
         .where(
-            ChatSession.session_id == session_id,
+            ChatSession.session_uuid == session_id,
             ChatSession.tenant_id == current_user.tenant_id,  # ← TENANT GUARD
             ChatSession.session_status == SessionStatus.ACTIVE,
             ChatSession.conversation_mode == ConversationMode.BOT,
@@ -404,7 +406,7 @@ def intervene_in_conversation(
         existing = (
             db.query(ChatSession)
             .filter(
-                ChatSession.session_id == session_id,
+                ChatSession.session_uuid == session_id,
                 ChatSession.tenant_id == current_user.tenant_id,
             )
             .first()
@@ -457,7 +459,7 @@ def connect_to_conversation(
     chat_session = (
         db.query(ChatSession)
         .filter(
-            ChatSession.session_id == session_id,
+            ChatSession.session_uuid == session_id,
             ChatSession.tenant_id == current_user.tenant_id,
             ChatSession.session_status == SessionStatus.ACTIVE,
             ChatSession.is_deleted == False,
@@ -494,19 +496,19 @@ def connect_to_conversation(
 # ── Close Conversation ──────────────────────────────────────────────────
 
 @router.post("/close/{session_id}")
-def close_conversation(
+async def close_conversation(
     session_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(1)),
 ):
-    """Agent closes a live conversation. Tenant-isolated."""
-    from app.services import session_service
+    """Agent ends their turn. Hands back control to BOT. Tenant-isolated."""
+    from app.models.chat_message import ChatMessage
 
-    # Verify session belongs to this tenant before closing
+    # Verify session belongs to this tenant
     session = (
         db.query(ChatSession)
         .filter(
-            ChatSession.session_id == session_id,
+            ChatSession.session_uuid == session_id,
             ChatSession.tenant_id == current_user.tenant_id,
             ChatSession.is_deleted == False,
         )
@@ -515,13 +517,52 @@ def close_conversation(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    success = session_service.close_session(db, session_id)
-    if not success:
-        raise HTTPException(status_code=400, detail="Session already closed")
+    # 🚨 HANDBACK LOGIC: Do NOT close session, just revert mode
+    session.conversation_mode = ConversationMode.BOT
+    session.agent_joined = False
+    session.assigned_agent_id = None
+    session.is_locked = False
+    session.updated_at = datetime.utcnow()
+    # Ensure is_active remains True
+    session.is_active = True
+    session.session_status = SessionStatus.ACTIVE
+
+    # 1. Create Enterprise Handback Message
+    handback_text = f"Agent {current_user.full_name} has left the conversation. Our assistant will continue to help you."
+    handback_msg = ChatMessage(
+        session_id=session.session_id,
+        message_type="bot",
+        message_text=handback_text,
+        created_at_utc=datetime.utcnow(),
+        created_at_local=datetime.utcnow(),
+    )
+    db.add(handback_msg)
+    db.commit()
+
+    # 2. Broadcast to client (so they see the bot is back)
+    await socket_manager.broadcast_event(
+        "NEW_MESSAGE",
+        {
+            "session_id": session_id,
+            "message": handback_text,
+            "sender": "bot",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    )
+    
+    # 3. Notify CRM list (remove from agent's active list or update status)
+    from app.api.live_chat import _assemble_items
+    session_item = _assemble_items([(session, None)], db)[0]
+    await socket_manager.broadcast_event(
+        "SESSION_UPDATED", 
+        session_item.model_dump(mode="json")
+    )
+
+    logger.info({"event": "agent_handback", "session_id": session_id, "agent_id": current_user.id})
+    return {"success": True, "message": "Handed back to bot."}
 
     logger.info({"event": "conversation_closed", "session_id": session_id, "closed_by": current_user.id})
-
-    return {"success": True, "message": "Conversation closed."}
+    return {"success": True, "message": "Conversation closed and client notified."}
 
 
 # ── WebSocket Dashboard Sync (Hardened) ────────────────────────────────

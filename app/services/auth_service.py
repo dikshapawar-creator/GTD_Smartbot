@@ -12,6 +12,9 @@ from app.core.security import (
 from app.core.config import settings
 from app.services.audit_service import AuditService
 
+import logging
+logger = logging.getLogger(__name__)
+
 # System tenant ID used for pre-tenant events (invalid token attempts only)
 # The failed login is associated with tenant_id of the found user
 SYSTEM_SENTINEL_TENANT_ID = None  # Only used for invalid-token bootstrap attempts
@@ -112,6 +115,7 @@ class AuthService:
         ).first()
 
         if not db_token:
+            logger.warning(f"Refresh failed: Token hash {token_hash} not found or invalid.")
             raise HTTPException(status_code=401, detail="Invalid session")
 
         user = db_token.user

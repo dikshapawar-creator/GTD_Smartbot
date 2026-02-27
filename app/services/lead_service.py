@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.models.lead import Lead, LeadStatusHistory, LeadStatus
 from app.schemas.chatbot import LeadSubmitRequest
 from datetime import datetime, timezone
-
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +23,7 @@ def update_lead_status(
     db: Session, 
     lead_id: str, 
     new_status: str, 
+    tenant_id: int = settings.DEFAULT_TENANT_ID,
     changed_by: str = "system",
     source: str = "api",
     expected_version: Optional[int] = None
@@ -30,7 +31,7 @@ def update_lead_status(
     """
     Controlled status transition with audit logging and optimistic locking.
     """
-    lead = db.query(Lead).filter(Lead.id == lead_id).first()
+    lead = db.query(Lead).filter(Lead.id == lead_id, Lead.tenant_id == tenant_id).first()
     if not lead:
         raise ValueError(f"Lead {lead_id} not found")
 
@@ -53,6 +54,7 @@ def update_lead_status(
     # Record history
     history = LeadStatusHistory(
         lead_id=lead.id,
+        tenant_id=tenant_id,
         old_status=old_status,
         new_status=new_status,
         changed_by=changed_by,
@@ -71,16 +73,17 @@ def update_lead_status(
     return lead
 
 
-def get_lead_history(db: Session, lead_id: str) -> List[LeadStatusHistory]:
+def get_lead_history(db: Session, lead_id: str, tenant_id: int = settings.DEFAULT_TENANT_ID) -> List[LeadStatusHistory]:
     """
     Retrieve audit trail for a lead.
     """
-    return db.query(LeadStatusHistory).filter(LeadStatusHistory.lead_id == str(lead_id)).order_by(LeadStatusHistory.changed_at.desc()).all()
+    return db.query(LeadStatusHistory).filter(LeadStatusHistory.lead_id == str(lead_id), LeadStatusHistory.tenant_id == tenant_id).order_by(LeadStatusHistory.changed_at.desc()).all()
 
 
 def create_or_update_lead(
     db: Session,
     lead_req: LeadSubmitRequest,
+    tenant_id: int = settings.DEFAULT_TENANT_ID,
     source: str = "chatbot"
 ) -> Tuple[Lead, bool]:
 
@@ -91,7 +94,11 @@ def create_or_update_lead(
     - Returns (lead, is_duplicate).
     """
     normalized_email = lead_req.business_email.strip().lower()
-    lead = db.query(Lead).filter(Lead.email == normalized_email, Lead.is_deleted == False).first()
+    lead = db.query(Lead).filter(
+        Lead.email == normalized_email, 
+        Lead.tenant_id == tenant_id,
+        Lead.is_deleted == False
+    ).first()
     
     is_duplicate = False
     if lead:
@@ -106,6 +113,7 @@ def create_or_update_lead(
             phone      = lead_req.contact_number,
             status     = LeadStatus.NEW,
             source     = source,
+            tenant_id  = tenant_id,
             created_at = datetime.now(timezone.utc),
         )
         db.add(lead)
@@ -117,11 +125,11 @@ def create_or_update_lead(
     return lead, is_duplicate
 
 
-def soft_delete_lead(db: Session, lead_id: str) -> bool:
+def soft_delete_lead(db: Session, lead_id: str, tenant_id: int = settings.DEFAULT_TENANT_ID) -> bool:
     """
     Enterprise Soft-Delete: Mark as deleted but preserve for audit.
     """
-    lead = db.query(Lead).filter(Lead.id == lead_id, Lead.is_deleted == False).first()
+    lead = db.query(Lead).filter(Lead.id == lead_id, Lead.tenant_id == tenant_id, Lead.is_deleted == False).first()
     if not lead:
         return False
     

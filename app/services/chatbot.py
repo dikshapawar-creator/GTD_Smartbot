@@ -78,10 +78,20 @@ class ChatbotService:
              next_state = ChatState.COUNTRY
              bot_response = STATE_QUESTIONS[ChatState.TRADE_TYPE]
 
+        elif current_state == ChatState.COMPLETE:
+            # They replied after the CTA — acknowledge and end gracefully
+            next_state = ChatState.ENDED
+            bot_response = "Thank you! Our team will reach out to you shortly. Have a wonderful day! 🎉"
+
+        elif current_state == ChatState.ENDED:
+            # Session is truly done — don't respond again
+            next_state = ChatState.ENDED
+            bot_response = ""  # Silence — session is over
+
         else:
-            # Default fallback for other states or if flow is done
+            # Unexpected state — recover with a CTA nudge
             next_state = ChatState.COMPLETE
-            bot_response = "Is there anything else I can help you with? You can always book a demo for a personalized walkthrough."
+            bot_response = "I'd be happy to help! You can book a demo with our experts for a personalized walkthrough."
 
         # 4. Update state in DB session row
         session_service.update_chat_state(db, chat_session, next_state)

@@ -33,6 +33,7 @@ class ChatSession(Base):
 
     # Server-generated UUID v4
     session_id = Column(String(36), nullable=False, unique=True, index=True)
+    session_uuid = Column(UNIQUEIDENTIFIER, nullable=False, unique=True, index=True, default=uuid.uuid4)
 
     # Ownership & Linkage
     user_id = Column(String(255), nullable=True)

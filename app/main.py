@@ -47,6 +47,20 @@ def create_app() -> FastAPI:
         redirect_slashes=False
     )
 
+    @app.middleware("http")
+    async def traceback_middleware(request: Request, call_next):
+        try:
+            return await call_next(request)
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            logger.error(f"Traceback caught: {tb}")
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=500,
+                content={"detail": str(e), "traceback": tb}
+            )
+
     # ── Request Logging Middleware ──────────────────────────────────
     # NOTE: Registered BEFORE CORSMiddleware so CORS wraps everything (LIFO order).
     @app.middleware("http")
@@ -91,9 +105,17 @@ def create_app() -> FastAPI:
     async def health():
         return {"status": "healthy", "app": settings.APP_NAME, "version": "5.0.3"}
 
+    @app.get("/debug-logs", tags=["System"])
+    async def debug_logs():
+        """Return some log records if possible."""
+        import logging
+        logger = logging.getLogger("app") # Or root
+        # This is a bit hacky, but let's try to get info from the logger handlers
+        return {"message": "Logs are sent to terminal. Check uvicorn output."}
+
     @app.get("/", tags=["System"])
     async def root():
-        return {"message": "Chatbot API is active", "docs": "/docs"}
+        return {"message": "Chatbot API is active", "version": "5.0.0"}
 
     return app
 

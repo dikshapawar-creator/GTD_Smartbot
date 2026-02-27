@@ -8,6 +8,9 @@ from app.core.dependencies import get_db
 from app.schemas.auth import TokenData
 from app.models.auth import User
 
+import logging
+logger = logging.getLogger(__name__)
+
 # HTTPBearer shows a clean "Bearer token" input box in Swagger UI /docs
 bearer_scheme = HTTPBearer()
 
@@ -36,8 +39,10 @@ async def get_current_user(
         user_id: str = payload.get("sub")
         token_version: int = payload.get("token_version")
         if user_id is None or token_version is None:
+            logger.warning(f"JWT context missing user_id or token_version. Payload: {payload}")
             raise credentials_exception
-    except Exception:
+    except Exception as e:
+        logger.error(f"JWT Decode failed: {str(e)} | Token starts with: {token[:10]}...")
         raise credentials_exception
         
     user = db.query(User).options(joinedload(User.role)).filter(User.id == int(user_id)).first()

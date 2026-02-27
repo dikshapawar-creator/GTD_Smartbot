@@ -48,12 +48,14 @@ def create_session(
     tenant_id: int = 1,
 ) -> ChatSession:
     """Creates a new session with senior IP & metadata tracking."""
-    session_id = str(uuid4())
+    s_uuid = uuid4()
+    session_id = str(s_uuid)
     now_utc = _now_utc()
     now_local = _to_local(now_utc, timezone_str)
 
     chat_session = ChatSession(
         session_id=session_id,
+        session_uuid=s_uuid,
         tenant_id=tenant_id,
         initial_ip=ip_address,
         last_seen_ip=ip_address,
@@ -93,7 +95,7 @@ def get_active_session(db: Session, session_id: str, tenant_id: Optional[int] = 
     Look up a session and check for inactivity-based expiry.
     """
     q = db.query(ChatSession).filter(
-        ChatSession.session_id == session_id, 
+        ChatSession.session_uuid == session_id, 
         ChatSession.session_status == SessionStatus.ACTIVE,
         ChatSession.is_deleted == False
     )
@@ -124,7 +126,7 @@ def close_session(db: Session, session_id: str, tenant_id: Optional[int] = None)
     """Mark as CLOSED and calculate duration metric."""
     q = (
         db.query(ChatSession)
-        .filter(ChatSession.session_id == session_id, ChatSession.is_deleted == False)
+        .filter(ChatSession.session_uuid == session_id, ChatSession.is_deleted == False)
     )
     if tenant_id is not None:
         q = q.filter(ChatSession.tenant_id == tenant_id)
@@ -197,7 +199,7 @@ def trigger_agent_takeover(db: Session, session_id: str, lead_id: Optional[str] 
     chat_session = (
         db.query(ChatSession)
         .filter(
-            ChatSession.session_id == session_id, 
+            ChatSession.session_uuid == session_id, 
             ChatSession.session_status == SessionStatus.ACTIVE,
             ChatSession.is_deleted == False
         )

@@ -40,6 +40,9 @@ class Lead(Base):
         {"extend_existing": True},
     )
 
+    # ── Scalability & Multi-tenancy ──────────────────────────────────────
+    tenant_id = Column(Integer, nullable=False, default=1, index=True)
+
     # ── Primary key (MSSQL safe UUID) ──────────────────────────────────────
     id = Column(
         UNIQUEIDENTIFIER, 
@@ -92,6 +95,7 @@ class LeadStatusHistory(Base):
     __tablename__ = "lead_status_history"
 
     id = Column(String(50), primary_key=True, default=lambda: str(uuid.uuid4()))
+    tenant_id = Column(Integer, nullable=False, default=1, index=True)
     lead_id = Column(String(50), ForeignKey("leads.id"), nullable=False)
     
     old_status = Column(String(50), nullable=False)

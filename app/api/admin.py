@@ -1,28 +1,82 @@
 from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+from datetime import datetime, timedelta
+
 from app.api.deps import require_role
+from app.core.dependencies import get_db
 from app.models.auth import User
+from app.models.lead import Lead, LeadStatus
+from app.models.chat_session import ChatSession, SessionStatus
+from app.models.chat_message import ChatMessage
 
 router = APIRouter(prefix="/admin", tags=["Administration (High Privilege)"])
 
-@router.get("/dashboard")
-def get_admin_dashboard(current_user: User = Depends(require_role(2))):
+@router.get("/stats")
+def get_dashboard_stats(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(2))
+):
     """
-    Access point for Administrators and Admins.
-    Note: 'administrator' bypasses this specifically in our require_role dependency.
+    Enterprise Dashboard Analytics: Represents real business data.
     """
-    return {
-        "message": f"Welcome to the Admin Dashboard, {current_user.email}",
-        "role": current_user.role.name,
-        "privileged_data": "Top secret enterprise trade metrics"
-    }
+    tenant_id = current_user.tenant_id
 
-@router.get("/system-stats")
-def get_system_stats(current_user: User = Depends(require_role(3))):
-    """
-    Access point restricted ONLY to 'administrator'.
-    """
+    # 1. KPI Metrics
+    total_leads = db.query(func.count(Lead.id)).filter(Lead.tenant_id == tenant_id, Lead.is_deleted == False).scalar()
+    new_leads = db.query(func.count(Lead.id)).filter(
+        Lead.tenant_id == tenant_id, 
+        Lead.status == LeadStatus.NEW, 
+        Lead.is_deleted == False
+    ).scalar()
+    
+    active_chats = db.query(func.count(ChatSession.id)).filter(
+        ChatSession.tenant_id == tenant_id,
+        ChatSession.session_status == SessionStatus.ACTIVE,
+        ChatSession.is_deleted == False
+    ).scalar()
+
+    total_messages = db.query(func.count(ChatMessage.id)).join(
+        ChatSession, ChatSession.session_id == ChatMessage.session_id
+    ).filter(ChatSession.tenant_id == tenant_id).scalar()
+
+    # 2. Recent Activities (Last 5 Leads)
+    recent_leads = db.query(Lead).filter(
+        Lead.tenant_id == tenant_id,
+        Lead.is_deleted == False
+    ).order_by(Lead.created_at.desc()).limit(5).all()
+
+    # 3. Recent Conversations (Last 5 Sessions)
+    recent_sessions = db.query(ChatSession).filter(
+        ChatSession.tenant_id == tenant_id,
+        ChatSession.is_deleted == False
+    ).order_by(ChatSession.last_activity_utc.desc()).limit(5).all()
+
     return {
-        "status": "operational",
-        "load": "0.45",
-        "database": "connected (MSSQL)"
+        "kpis": {
+            "total_leads": total_leads,
+            "new_leads": new_leads,
+            "active_chats": active_chats,
+            "total_messages": total_messages
+        },
+        "recent_leads": [
+            {
+                "id": str(l.id),
+                "name": l.name,
+                "email": l.email,
+                "company": l.company,
+                "status": l.status,
+                "created_at": l.created_at.isoformat()
+            } for l in recent_leads
+        ],
+        "recent_sessions": [
+            {
+                "session_id": s.session_id,
+                "client_ip": s.initial_ip,
+                "country": s.country,
+                "status": s.session_status,
+                "last_activity": s.last_activity_utc.isoformat(),
+                "mode": s.conversation_mode
+            } for s in recent_sessions
+        ]
     }
