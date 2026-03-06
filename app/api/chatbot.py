@@ -91,6 +91,8 @@ async def initialize_session(request: Request, response: Response, db: Session =
         key=settings.SESSION_COOKIE_NAME,
         value=new_session.session_id,
         httponly=True,
+        secure=True,
+        samesite="none",
         max_age=settings.SESSION_EXPIRY_MINUTES * 60
     )
 
@@ -116,6 +118,17 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
     - Handoff logic (Bot silence after handover message).
     """
     session_id = request.cookies.get(settings.SESSION_COOKIE_NAME)
+
+    # Fallback: read session UUID from Authorization: Bearer <session_uuid>
+    # This handles cross-origin requests where cookies are blocked by the browser
+    if not session_id:
+        auth_header = request.headers.get('Authorization', '')
+        if auth_header.startswith('Bearer '):
+            bearer_val = auth_header[len('Bearer '):].strip()
+            # Only accept UUIDs (no dots) — reject Admin JWTs which contain dots
+            if bearer_val and '.' not in bearer_val:
+                session_id = bearer_val  # Use UUID directly
+
     if not session_id:
         raise HTTPException(status_code=401, detail="Session required.")
 
@@ -344,6 +357,15 @@ async def get_chat_history(request: Request, db: Session = Depends(get_db)):
     Returns full message history for the current session to enable persistence.
     """
     session_id = request.cookies.get(settings.SESSION_COOKIE_NAME)
+
+    # Fallback: read session UUID from Authorization: Bearer <session_uuid>
+    if not session_id:
+        auth_header = request.headers.get('Authorization', '')
+        if auth_header.startswith('Bearer '):
+            bearer_val = auth_header[len('Bearer '):].strip()
+            if bearer_val and '.' not in bearer_val:
+                session_id = bearer_val  # Use UUID directly
+
     if not session_id:
         return []
 
