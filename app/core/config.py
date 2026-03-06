@@ -4,13 +4,6 @@ from typing import List, Union, Any
 import json
 
 
-import os
-
-# Calculate the path to the .env file (root of the repo)
-# config.py is in app/core/, so root is ../../
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-ENV_PATH = os.path.join(BASE_DIR, ".env")
-
 class Settings(BaseSettings):
     APP_NAME: str = "GTD Service Intelligence"
     DATABASE_URL: str
@@ -40,12 +33,15 @@ class Settings(BaseSettings):
     # CORS
     # Defined as strict string to bypass Pydantic V2 list JSON parsing errors from .env
     CORS_ORIGINS: str = (
-        "http://localhost:3000,http://localhost:8000,https://gtt-smartbot-frontend.vercel.app"
+        "http://localhost:3000,http://localhost:8000,https://gtt-smartbot-frontend.vercel.app,"
+        "https://gtdservice.com,https://www.gtdservice.com"
     )
+    # Regex matches: Vercel preview URLs + any additional client website domains
+    # Add client site domains to .env as CORS_ORIGIN_REGEX to avoid code redeployment
     CORS_ORIGIN_REGEX: str = r"https://gtt-smartbot-frontend-.*\.vercel\.app"
 
     model_config = SettingsConfigDict(
-        env_file=ENV_PATH,
+        env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore"
     )
