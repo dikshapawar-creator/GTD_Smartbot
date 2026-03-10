@@ -1,25 +1,114 @@
 import logging
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy import create_engine, text, event
+from sqlalchemy.orm import sessionmaker, declarative_base, Session
+from sqlalchemy.exc import OperationalError
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# robust engine creation with pool_pre_ping for better resilience
-# The DSN should be correctly formatted in .env (e.g. mssql+pyodbc://...)
+# ── Enterprise-Grade SQL Server Connection — Always-On ─────────────────────
+#
+# Architecture:
+#   Frontend (Vercel) → Backend Server (103.30.72.94) → SQL Server (103.30.72.94:1433)
+#
+# The DATABASE_URL points to the REMOTE SQL Server IP — never localhost.
+# Connection resilience is layered at 3 levels:
+#   1. ODBC Driver level  → ConnectRetryCount/Interval (URL params + connect_args)
+#   2. SQLAlchemy pool    → pool_pre_ping + pool_recycle keeps pool healthy
+#   3. Application level  → get_db_with_retry() retries on OperationalError
+#
 engine = create_engine(
     settings.DATABASE_URL,
-    pool_pre_ping=True,      # Checks connection health before use
-    pool_recycle=1800,       # Recycle connections every 30 mins
-    pool_size=10,            # Maintain a base pool of 10 connections
-    max_overflow=20,         # Allow up to 20 additional "burst" connections
-    pool_timeout=30,         # Wait up to 30s before timing out
-    echo=False
+    # ── Pool Settings ────────────────────────────────────────────────────
+    pool_pre_ping=True,      # Validate connection health before every use
+    pool_recycle=1200,       # Recycle every 20 min (SQL Server drops idle at ~30 min)
+    pool_size=10,            # Keep 10 warm connections in the pool at all times
+    max_overflow=20,         # Allow up to 20 extra burst connections
+    pool_timeout=30,         # Max queue wait before raising error
+    # ── ODBC Connection Resiliency ───────────────────────────────────────
+    # Microsoft ODBC Driver 18 built-in retry — handles TCP drops at driver level.
+    # ConnectRetryCount/Interval also embedded in DATABASE_URL for dual enforcement.
+    connect_args={
+        "ConnectRetryCount": 3,      # Retry up to 3x on broken TCP connection
+        "ConnectRetryInterval": 10,  # 10s between driver-level retries
+        "Connection Timeout": 30,    # Max 30s for initial connection establishment
+        "TrustServerCertificate": "yes",  # Required for non-Azure SQL Server
+    },
+    echo=False,
 )
+
+# ── Connection Event Listener ─────────────────────────────────────────────
+# Logs every NEW physical connection to the pool so you can see in journalctl
+# exactly when SQLAlchemy reconnects after a drop.
+@event.listens_for(engine, "connect")
+def on_connect(dbapi_connection, connection_record):
+    logger.info("Database: New physical connection established to SQL Server.")
+
+@event.listens_for(engine, "checkout")
+def on_checkout(dbapi_connection, connection_record, connection_proxy):
+    """Called every time a connection is checked out from the pool."""
+    pass  # pool_pre_ping handles validation; this is a hook for future use
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
+
+
+def get_db():
+    """
+    Standard FastAPI dependency — yields a DB session.
+    Uses pool_pre_ping to validate connection health before each request.
+    """
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def get_db_with_retry():
+    """
+    Hardened DB dependency with application-level retry on connection failure.
+    Use this for critical endpoints (e.g. /chat/session/init) that must not
+    fail due to transient SQL Server connection drops.
+    """
+    import time
+    db = SessionLocal()
+    try:
+        # Explicit health check before yielding
+        db.execute(text("SELECT 1"))
+        yield db
+    except OperationalError:
+        logger.warning("Database: Connection check failed, disposing pool and retrying...")
+        db.close()
+        engine.dispose()
+        time.sleep(0.5)
+        db = SessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+def keep_alive_ping() -> bool:
+    """
+    Utility: ping the database to keep the connection pool warm.
+    Call this from the health check endpoint or a background scheduler.
+    Returns True if the DB is reachable, False otherwise.
+    """
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return True
+    except Exception as e:
+        logger.warning(f"Database: Keep-alive ping failed — {e}")
+        return False
+
 
 
 def init_db():

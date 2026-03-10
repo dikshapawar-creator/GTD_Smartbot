@@ -47,45 +47,74 @@ def create_session(
     fingerprint: Optional[str] = None,
     tenant_id: int = 1,
 ) -> ChatSession:
-    """Creates a new session with senior IP & metadata tracking."""
-    s_uuid = uuid4()
-    session_id = str(s_uuid)
-    now_utc = _now_utc()
-    now_local = _to_local(now_utc, timezone_str)
+    """Creates a new session with senior IP & metadata tracking.
+    
+    Includes one automatic retry on transient DB connection failures
+    (e.g. '08S01 Communication link failure' from idle connection drops).
+    """
+    import time
+    from sqlalchemy.exc import OperationalError
 
-    chat_session = ChatSession(
-        session_id=session_id,
-        session_uuid=s_uuid,
-        tenant_id=tenant_id,
-        initial_ip=ip_address,
-        last_seen_ip=ip_address,
-        last_seen_at=now_utc,
-        visitor_fingerprint=fingerprint,
-        user_agent=user_agent,
-        browser=browser,
-        os=os_name,
-        device_type=device_type,
-        country=country,
-        city=city,
-        timezone=timezone_str,
-        started_at_utc=now_utc,
-        started_at_local=now_local,
-        last_activity_utc=now_utc,
-        session_status=SessionStatus.ACTIVE,
-        conversation_mode=ConversationMode.BOT,
-        status="ACTIVE",
-        is_deleted=False,
-    )
-    db.add(chat_session)
-    db.commit()
-    db.refresh(chat_session)
+    def _do_insert(db: Session) -> ChatSession:
+        s_uuid = uuid4()
+        session_id = str(s_uuid)
+        now_utc = _now_utc()
+        now_local = _to_local(now_utc, timezone_str)
 
+        chat_session = ChatSession(
+            session_id=session_id,
+            session_uuid=s_uuid,
+            tenant_id=tenant_id,
+            initial_ip=ip_address,
+            last_seen_ip=ip_address,
+            last_seen_at=now_utc,
+            visitor_fingerprint=fingerprint,
+            user_agent=user_agent,
+            browser=browser,
+            os=os_name,
+            device_type=device_type,
+            country=country,
+            city=city,
+            timezone=timezone_str,
+            started_at_utc=now_utc,
+            started_at_local=now_local,
+            last_activity_utc=now_utc,
+            session_status=SessionStatus.ACTIVE,
+            conversation_mode=ConversationMode.BOT,
+            status="ACTIVE",
+            is_deleted=False,
+        )
+        db.add(chat_session)
+        db.commit()
+        db.refresh(chat_session)
+        return chat_session
+
+    try:
+        chat_session = _do_insert(db)
+    except OperationalError as e:
+        # ── Transient connection failure: invalidate + retry once ────────
+        # Covers: ('08S01', 'Communication link failure') and similar
+        logger.warning(
+            f"session_service.create_session: Transient DB error, invalidating connection and retrying. Error: {e}"
+        )
+        try:
+            db.rollback()
+            # Invalidate the underlying connection so SQLAlchemy discards it
+            # and picks a fresh one from the pool on the next operation.
+            db.bind.dispose()
+        except Exception:
+            pass
+        time.sleep(0.5)  # Brief pause to allow pool to establish a fresh connection
+        # Re-raise if the retry also fails — error will bubble up to the API handler
+        chat_session = _do_insert(db)
+
+    session_id = chat_session.session_id
     logger.info({
         "event": "session_created",
         "session_id": session_id,
         "tenant_id": tenant_id,
         "ip": ip_address,
-        "timestamp": now_utc.isoformat()
+        "timestamp": _now_utc().isoformat()
     })
     return chat_session
 

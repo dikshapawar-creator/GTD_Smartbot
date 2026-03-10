@@ -54,12 +54,40 @@ def create_app() -> FastAPI:
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
+            # ── Log full details server-side ONLY ──────────────────────────
             logger.error(f"Traceback caught: {tb}")
             from fastapi.responses import JSONResponse
+            # ── NEVER expose raw SQL / traceback to the client ─────────────
             return JSONResponse(
                 status_code=500,
-                content={"detail": str(e), "traceback": tb}
+                content={
+                    "success": False,
+                    "message": "Something went wrong. Please try again later."
+                }
             )
+
+    # ── Global Exception Handler (second safety net) ─────────────────────
+    from fastapi.responses import JSONResponse as _JSONResponse
+    from fastapi.exceptions import RequestValidationError
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+        # Pass through standard HTTP errors (401, 403, 404, etc.) unchanged
+        return _JSONResponse(status_code=exc.status_code, content={"success": False, "message": exc.detail})
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(request: Request, exc: RequestValidationError):
+        return _JSONResponse(status_code=422, content={"success": False, "message": "Invalid request data.", "errors": exc.errors()})
+
+    @app.exception_handler(Exception)
+    async def global_exception_handler(request: Request, exc: Exception):
+        import traceback
+        logger.error(f"Global exception handler caught: {traceback.format_exc()}")
+        return _JSONResponse(
+            status_code=500,
+            content={"success": False, "message": "Something went wrong. Please try again later."}
+        )
 
     # ── Request Logging Middleware ──────────────────────────────────
     # NOTE: Registered BEFORE CORSMiddleware so CORS wraps everything (LIFO order).
@@ -103,7 +131,14 @@ def create_app() -> FastAPI:
     # Health Checks
     @app.get("/health", tags=["System"])
     async def health():
-        return {"status": "healthy", "app": settings.APP_NAME, "version": "5.0.3"}
+        from app.db.session import keep_alive_ping
+        db_ok = keep_alive_ping()
+        return {
+            "status": "healthy" if db_ok else "degraded",
+            "database": "connected" if db_ok else "unreachable",
+            "app": settings.APP_NAME,
+            "version": "5.0.3"
+        }
 
     @app.get("/debug-logs", tags=["System"])
     async def debug_logs():
