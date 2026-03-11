@@ -99,6 +99,12 @@ class ChatSession(Base):
     agent_joined = Column(Boolean, default=False, nullable=False) # Bot uses this to stop replying
     has_greeted = Column(Boolean, default=False, nullable=False)
     chat_state = Column(String(50), nullable=False, default="START")
+    
+    # Analytics & Scoring Extensions
+    lead_score = Column(Integer, nullable=False, default=0)
+    lead_status = Column(String(50), nullable=False, default="Cold")
+    spam_flag = Column(Boolean, nullable=False, default=False)
+    language = Column(String(50), nullable=True, default="en")
 
     # Legacy field (kept for migration compatibility) — non-nullable in some DB versions
     status = Column(String(50), nullable=False, default="ACTIVE")

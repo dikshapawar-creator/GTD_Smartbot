@@ -183,10 +183,39 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
 
     # ── 2. INTENT & LEAD LOGIC ──────────────────────────────────────────
     user_message = msg_req.message
+    
+    # Analytics: Spam Detection
+    from app.services.spam_service import check_message_spam
+    if check_message_spam(db, active_session, user_message):
+        active_session.spam_flag = True
+        active_session.session_status = SessionStatus.CLOSED
+        db.commit()
+        return {
+            "sessionId": str(active_session.session_uuid),
+            "message": "Security policy violation detected. Session closed.",
+            "state": active_session.chat_state,
+            "conversation_status": active_session.conversation_mode
+        }
+
+    # Analytics: Language Translation
+    from app.services.language_service import detect_and_translate
+    lang_code, translated_message = detect_and_translate(user_message)
+    if not active_session.language or active_session.language == "en":
+        active_session.language = lang_code
+        db.commit()
+
     # Save user message immediately to DB
     session_service.save_message(db, active_session, user_message, "user")
     
-    intent = intent_service.detect_intent(db, user_message)
+    # Analytics: Lead Scoring (Evaluate translated message)
+    from app.services.scoring_service import update_session_score
+    active_session = update_session_score(db, active_session, translated_message)
+    
+    if active_session.lead_status == "Hot":
+        # Placeholder for smart sales alert
+        print(f"🔥 HOT LEAD DETECTED: Session {active_session.session_id}")
+
+    intent = intent_service.detect_intent(db, translated_message)
     current_state = active_session.chat_state
     bot_msg = ""
     
@@ -201,7 +230,7 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
         session_service.save_message(db, active_session, bot_msg, "bot")
         db.commit() # COMMIT BEFORE BROADCAST
         
-        # 🔥 Broadcast handoff signal
+        #  Broadcast handoff signal
         from app.core.socket_manager import socket_manager
         await socket_manager.broadcast_event(
             "NEW_MESSAGE",
@@ -313,7 +342,7 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
         session_service.save_message(db, active_session, bot_msg, "bot")
         db.commit() # FINAL COMMIT BEFORE BROADCAST
 
-    # 🔥 Broadcast both user and bot messages to CRM
+    #  Broadcast both user and bot messages to CRM
     from app.core.socket_manager import socket_manager
     await socket_manager.broadcast_event(
         "NEW_MESSAGE",
