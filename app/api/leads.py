@@ -20,11 +20,20 @@ from app.schemas.chatbot import (
     ConversationResponse, 
     LeadSubmitRequest, 
     StatusUpdateRequest, 
-    LeadStatusHistoryResponse
+    LeadStatusHistoryResponse,
+    PaginatedLeadResponse
 )
 from app.services import lead_service
 
 logger = logging.getLogger(__name__)
+
+# ── Simple In-Memory Rate Limiter ──────────────────────────────────────────
+# Key: IP, Value: List of timestamps
+from collections import defaultdict
+from time import time
+_submission_track: defaultdict = defaultdict(list)
+RATE_LIMIT_STRIKES = 3
+RATE_LIMIT_WINDOW = 300 # 5 minutes
 
 router = APIRouter(prefix="/leads", tags=["Leads Admin"])
 
@@ -45,6 +54,22 @@ async def submit_lead(
     from app.api.live_chat import _assemble_items
 
     try:
+        # 0. Anti-Bot Protection (Honeypot)
+        if lead_req.hp_field and lead_req.hp_field.strip() != "":
+             logger.warning(f"Honeypot triggered from IP {request.client.host if request.client else 'unknown'}")
+             return {"success": True, "message": "Thank you. Our team will contact you soon."} # Fake success for bots
+
+        # 0.1 Rate Limiting (IP-based)
+        client_ip = request.client.host if request.client else "unknown"
+        now = time()
+        # Clean old strikes
+        _submission_track[client_ip] = [t for t in _submission_track[client_ip] if now - t < RATE_LIMIT_WINDOW]
+        if len(_submission_track[client_ip]) >= RATE_LIMIT_STRIKES:
+             logger.warning(f"Rate limit exceeded for IP {client_ip}")
+             raise HTTPException(status_code=429, detail="Too many requests. Please try again later.")
+        
+        _submission_track[client_ip].append(now)
+
         # 1. Get Session & Tenant (if possible)
         session_id = request.cookies.get(settings.SESSION_COOKIE_NAME)
         chat_session = None
@@ -60,7 +85,8 @@ async def submit_lead(
             db, 
             lead_req, 
             tenant_id=current_tenant_id, 
-            source="chatbot"
+            source="chatbot",
+            session_id=str(chat_session.session_id) if chat_session else None
         )
 
         # 3. Trigger Agent Takeover if session exists
@@ -98,37 +124,50 @@ async def submit_lead(
 
 
 
-@router.get("/", response_model=List[LeadResponse], summary="Get all leads")
+@router.get("/", response_model=PaginatedLeadResponse, summary="Get all leads (Filtered & Paginated)")
 def get_leads(
-    skip: int = 0,
-    limit: int = 50,
-    status: Optional[LeadStatus] = None,
+    search: Optional[str] = None,
+    status: Optional[str] = None,
+    country: Optional[str] = None,
+    trade_type: Optional[str] = None,
+    product: Optional[str] = None,
+    source: Optional[str] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    page: int = 1,
+    limit: int = 20,
+    sort_by: str = "created_at",
+    sort_order: str = "desc",
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(2))
 ):
     """
-    Retrieve leads with pagination and optional status filter.
-    Pagination limit is capped at 100 to prevent system overload.
+    Scalable CRM endpoint for lead management.
+    Handles searching, filtering, sorting, and pagination in the DB.
     """
-    logger.info(f"Leads: Fetching for user {current_user.email} | Tenant {current_user.tenant_id} | Status: {status}")
-    
-    if limit > 100:
-        limit = 100
-        
-    query = db.query(Lead).filter(
-        Lead.tenant_id == current_user.tenant_id, # ← TENANT ISOLATION
-        Lead.is_deleted == False
+    leads, total = lead_service.get_filtered_leads(
+        db,
+        tenant_id=current_user.tenant_id,
+        search=search,
+        status=status,
+        country=country,
+        trade_type=trade_type,
+        product=product,
+        source=source,
+        start_date=start_date,
+        end_date=end_date,
+        page=page,
+        limit=limit,
+        sort_by=sort_by,
+        sort_order=sort_order
     )
-
-    if status:
-        query = query.filter(Lead.status == status)
     
-    return (
-        query.order_by(Lead.created_at.desc())
-        .offset(skip)
-        .limit(limit)
-        .all()
-    )
+    return {
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "data": leads
+    }
 
 
 

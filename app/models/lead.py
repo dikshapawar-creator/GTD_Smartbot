@@ -37,6 +37,9 @@ class Lead(Base):
     __table_args__ = (
         Index("ix_leads_status", "status"),
         Index("ix_leads_created_at", "created_at"),
+        Index("ix_leads_country", "country_interested"),
+        Index("ix_leads_trade_type", "trade_type"),
+        Index("ix_leads_source", "source"),
         {"extend_existing": True},
     )
 

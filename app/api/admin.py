@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 from app.api.deps import require_role
 from app.core.dependencies import get_db
-from app.models.auth import User
+from app.models.auth import User, AuditLog
 from app.models.lead import Lead, LeadStatus
 from app.models.chat_session import ChatSession, SessionStatus
 from app.models.chat_message import ChatMessage
@@ -21,6 +21,7 @@ def get_dashboard_stats(
     Enterprise Dashboard Analytics: Represents real business data.
     """
     tenant_id = current_user.tenant_id
+    tenant_name = current_user.tenant.name if current_user.tenant else "System Workspace"
 
     # 1. KPI Metrics
     total_leads = db.query(func.count(Lead.id)).filter(Lead.tenant_id == tenant_id, Lead.is_deleted == False).scalar()
@@ -59,6 +60,25 @@ def get_dashboard_stats(
             "active_chats": active_chats,
             "total_messages": total_messages
         },
+        "tenant_name": tenant_name,
+        "notifications": [
+             {
+                 "id": str(log.id),
+                 "message": log.action,
+                 "time": log.created_at.isoformat()
+             } for log in db.query(AuditLog).filter(
+                 AuditLog.tenant_id == tenant_id,
+                 ~AuditLog.action.ilike("%LOGIN%"),
+                 ~AuditLog.action.ilike("%LOGOUT%"),
+                 ~AuditLog.action.ilike("%BOOTSTRAP%")
+             ).order_by(AuditLog.created_at.desc()).limit(10).all()
+        ] if db.query(AuditLog).filter(AuditLog.tenant_id == tenant_id).first() else [
+             {
+                 "id": "welcome_1",
+                 "message": f"Welcome to the {tenant_name} portal. Setup your first chat session.",
+                 "time": datetime.utcnow().isoformat()
+             }
+        ],
         "recent_leads": [
             {
                 "id": str(l.id),

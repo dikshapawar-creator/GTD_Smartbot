@@ -87,6 +87,7 @@ class LeadResponse(BaseModel):
     product: Optional[str] = None
     requirement_type: Optional[str] = None
     status: LeadStatus = LeadStatus.NEW
+    source: str = "chatbot"
     version: int = 1
     created_at: datetime
     updated_at: Optional[datetime] = None
@@ -217,6 +218,40 @@ class LeadSubmitRequest(BaseModel):
                 raise ValueError("Invalid form submission detected")
         return v
 
+    @model_validator(mode='after')
+    def validate_enterprise_rules(self) -> 'LeadSubmitRequest':
+        # 1. Personal Email -> Website Required
+        personal_domains = [
+            'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 
+            'icloud.com', 'protonmail.com', 'aol.com', 'zoho.com', 'mail.com'
+        ]
+        domain = self.business_email.split('@')[1].lower()
+        if domain in personal_domains and not self.website:
+            raise ValueError("Website is required for verification when using a personal email.")
+
+        # 2. Phone Length Validation
+        # We check common country lengths if the prefix matches
+        digits = re.sub(r'\D', '', self.contact_number)
+        
+        # Mapping: Prefix -> Expected Digits (local)
+        phone_rules = {
+            "91": 10,  # India
+            "1": 10,   # US/Canada
+            "44": 10,  # UK
+            "971": 9,  # UAE
+            "65": 8,   # Singapore
+            "852": 8,  # HK
+        }
+        
+        for prefix, length in phone_rules.items():
+            if self.contact_number.startswith(f"+{prefix}"):
+                local_part = self.contact_number[len(prefix)+1:]
+                local_digits = re.sub(r'\D', '', local_part)
+                if len(local_digits) != length:
+                    raise ValueError(f"Phone number for +{prefix} must be exactly {length} digits.")
+        
+        return self
+
 
 
 class ConversationResponse(BaseModel):
@@ -226,3 +261,9 @@ class ConversationResponse(BaseModel):
     sender: str
     timestamp: datetime
     model_config = ConfigDict(from_attributes=True)
+
+class PaginatedLeadResponse(BaseModel):
+    total: int
+    page: int
+    limit: int
+    data: List[LeadResponse]

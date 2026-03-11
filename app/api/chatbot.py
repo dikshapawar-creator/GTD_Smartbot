@@ -12,7 +12,7 @@ from app.core.config import settings
 from app.models.chat_session import ChatSession, SessionStatus, ConversationMode
 
 from app.models.chat_message import ChatMessage
-
+from app.models.blocked import BlockedVisitor
 from app.services.chatbot import ChatbotService
 from app.services import session_service, intent_service, greeting_handler, lead_service
 from app.core import utils
@@ -52,6 +52,18 @@ async def initialize_session(request: Request, response: Response, db: Session =
     client_ip = utils.get_client_ip(request)
     meta = utils.get_visitor_metadata(request)
     fingerprint = utils.generate_visitor_fingerprint(client_ip, meta["user_agent"])
+
+    # 🚨 SECURITY: Blocked Visitor Check
+    is_blocked = db.query(BlockedVisitor).filter(
+        (BlockedVisitor.ip_address == client_ip) | 
+        (BlockedVisitor.visitor_fingerprint == fingerprint)
+    ).first()
+    
+    if is_blocked:
+        raise HTTPException(
+            status_code=403, 
+            detail="Your access has been restricted due to security policy violations."
+        )
 
     # Real-time Geolocation
     from app.services import geo_service

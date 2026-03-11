@@ -9,7 +9,7 @@ Enterprise hardened:
 """
 import logging
 from typing import List, Optional, Dict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 
 from fastapi import (
     APIRouter, Depends, HTTPException, BackgroundTasks,
@@ -27,24 +27,35 @@ from app.models.auth import User
 from app.models.chat_session import ChatSession, SessionStatus, ConversationMode
 from app.models.chat_message import ChatMessage
 from app.models.lead import Lead
+from app.models.blocked import BlockedVisitor
 from app.core.socket_manager import socket_manager
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/live-chat", tags=["Live Chat"])
 
+def is_valid_uuid(val: str) -> bool:
+    """Helper to check if a string is a valid UUID before querying UNIQUEIDENTIFIER columns."""
+    import uuid
+    try:
+        uuid.UUID(str(val))
+        return True
+    except ValueError:
+        return False
+
 
 # ── Response Schemas ────────────────────────────────────────────────────
 
 class LiveConversationItem(BaseModel):
     session_id: str
+    session_uuid: str
     session_status: str
     current_mode: str
     agent_name: Optional[str] = None
     message_count: int = 0
     previous_session_count: int = 0
     repeat_visitor: bool = False
-    created_at: datetime
+    created_at: Optional[datetime] = None
     last_message_at: Optional[datetime] = None
     is_locked: bool = False
     lead_name: Optional[str] = None
@@ -56,6 +67,12 @@ class LiveConversationItem(BaseModel):
     browser: Optional[str] = None
     os: Optional[str] = None
     device_type: Optional[str] = None
+    lead_score: Optional[int] = 0
+    lead_status: Optional[str] = "Cold"
+    spam_flag: bool = False
+    language: Optional[str] = "en"
+    duration_seconds: Optional[int] = 0
+    started_at_local: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -64,6 +81,7 @@ class LiveConversationItem(BaseModel):
 class ConversationDetailItem(LiveConversationItem):
     """Extended schema with PII — only returned by detail endpoint."""
     lead_email: Optional[str] = None
+    lead_phone: Optional[str] = None
 
 
 class ChatMessageItem(BaseModel):
@@ -91,6 +109,13 @@ class PaginatedMessages(BaseModel):
     items: List[ChatMessageItem]
 
 
+class LeadUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    company: Optional[str] = None
+
+
 # ── Internal Helper — Paginated Conversation Query ──────────────────────
 
 def _build_conversation_query(
@@ -110,14 +135,15 @@ def _build_conversation_query(
         .outerjoin(User, ChatSession.assigned_agent_id == User.id)
         .filter(
             ChatSession.tenant_id == tenant_id,          # ← TENANT ISOLATION
-            ChatSession.is_active == True,               # ← DASHBOARD VISIBILITY
             ChatSession.is_deleted == False,              # ← SOFT DELETE GUARD
         )
     )
+    if only_active:
+        q = q.filter(ChatSession.is_active == True)      # ← DASHBOARD VISIBILITY ONLY
 
     if only_active:
         # Filter for ACTIVE sessions that have had activity within the expiry window
-        expiry_limit = datetime.utcnow() - timedelta(minutes=settings.SESSION_EXPIRY_MINUTES)
+        expiry_limit = datetime.now(dt_timezone.utc).replace(tzinfo=None) - timedelta(minutes=settings.SESSION_EXPIRY_MINUTES)
         q = q.filter(
             ChatSession.session_status == SessionStatus.ACTIVE,
             ChatSession.last_activity_utc >= expiry_limit
@@ -187,15 +213,16 @@ def _assemble_items(sessions, db: Session) -> List[LiveConversationItem]:
         results.append(
             LiveConversationItem.model_validate(
                 {
-                    "session_id": str(s.session_uuid), # Use UUID for external referencing
+                    "session_id": s.session_id,
+                    "session_uuid": str(s.session_uuid),
                     "session_status": s.session_status,
                     "current_mode": s.conversation_mode,
                     "agent_name": agent_name,
                     "message_count": s.total_messages,
                     "previous_session_count": past_count,
                     "repeat_visitor": past_count > 0,
-                    "created_at": s.started_at_utc,
-                    "last_message_at": s.last_activity_utc,
+                    "created_at": s.started_at_utc.replace(tzinfo=dt_timezone.utc) if s.started_at_utc else None,
+                    "last_message_at": s.last_activity_utc.replace(tzinfo=dt_timezone.utc) if s.last_activity_utc else None,
                     "is_locked": s.is_locked,
                     "lead_name": lead.name if lead else (f"{s.initial_ip} ({s.country})" if s.initial_ip and s.country else "Visitor"),
                     "lead_company": lead.company if lead else None,
@@ -205,6 +232,12 @@ def _assemble_items(sessions, db: Session) -> List[LiveConversationItem]:
                     "browser": s.browser,
                     "os": s.os,
                     "device_type": s.device_type,
+                    "lead_score": s.lead_score,
+                    "lead_status": s.lead_status,
+                    "spam_flag": s.spam_flag,
+                    "language": s.language,
+                    "duration_seconds": s.duration_seconds,
+                    "started_at_local": s.started_at_local.replace(tzinfo=dt_timezone.utc) if s.started_at_local else None, # Even local is stored naive, treat as UTC for transport
                 }
             )
         )
@@ -229,6 +262,50 @@ def list_live_conversations(
     )
     sessions = q.all()
     return _assemble_items(sessions, db)
+
+
+# ── Conversation Analytics ──────────────────────────────────────────────
+
+@router.get("/analytics")
+def get_conversation_analytics(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(1)),
+):
+    """
+    Real-time session analytics for the dashboard.
+    """
+    tenant_id = current_user.tenant_id
+    
+    active_sessions = db.query(func.count(ChatSession.id)).filter(
+        ChatSession.tenant_id == tenant_id,
+        ChatSession.session_status == SessionStatus.ACTIVE,
+        ChatSession.is_deleted == False
+    ).scalar()
+    
+    avg_duration = db.query(func.avg(ChatSession.duration_seconds)).filter(
+        ChatSession.tenant_id == tenant_id,
+        ChatSession.is_deleted == False,
+        ChatSession.duration_seconds.isnot(None)
+    ).scalar() or 0
+    
+    avg_score = db.query(func.avg(ChatSession.lead_score)).filter(
+        ChatSession.tenant_id == tenant_id,
+        ChatSession.is_deleted == False
+    ).scalar() or 0
+    
+    spam_sessions = db.query(func.count(ChatSession.id)).filter(
+        ChatSession.tenant_id == tenant_id,
+        ChatSession.spam_flag == True,
+        ChatSession.is_deleted == False
+    ).scalar()
+    
+    return {
+        "active_visitors": active_sessions,
+        "avg_lead_score": round(float(avg_score or 0), 1),
+        "avg_duration": round(float(avg_duration or 0), 0),
+        "spam_visitors": spam_sessions,
+        "agent_chats": active_sessions # Placeholder for active agent handling
+    }
 
 
 # ── Paginated History (Archive View) ────────────────────────────────────
@@ -276,11 +353,16 @@ def get_conversation_detail(
     Returns full detail for a single session including lead_email.
     Enforces tenant isolation — 404 if session belongs to another tenant.
     """
+    query_id = session_id
+    id_filter = ChatSession.session_id == query_id
+    if is_valid_uuid(query_id):
+        id_filter = (ChatSession.session_uuid == query_id) | (ChatSession.session_id == query_id)
+
     row = (
         db.query(ChatSession, User.full_name.label("agent_name"))
         .outerjoin(User, ChatSession.assigned_agent_id == User.id)
         .filter(
-            ChatSession.session_uuid == session_id,
+            id_filter,
             ChatSession.tenant_id == current_user.tenant_id,
             ChatSession.is_deleted == False,
         )
@@ -295,24 +377,32 @@ def get_conversation_detail(
     return ConversationDetailItem.model_validate(
         {
             "session_id": s.session_id,
+            "session_uuid": str(s.session_uuid),
             "session_status": s.session_status,
             "current_mode": s.conversation_mode,
             "agent_name": agent_name,
             "message_count": s.total_messages,
             "previous_session_count": 0,
             "repeat_visitor": False,
-            "created_at": s.started_at_utc,
-            "last_message_at": s.last_activity_utc,
+            "created_at": s.started_at_utc.replace(tzinfo=dt_timezone.utc) if s.started_at_utc else None,
+            "last_message_at": s.last_activity_utc.replace(tzinfo=dt_timezone.utc) if s.last_activity_utc else None,
             "is_locked": s.is_locked,
             "lead_name": lead.name if lead else "Visitor",
             "lead_company": lead.company if lead else None,
             "lead_email": lead.email if lead else None,
+            "lead_phone": lead.phone if lead else None,
             "initial_ip": s.initial_ip,
             "country": s.country,
             "city": s.city,
             "browser": s.browser,
             "os": s.os,
             "device_type": s.device_type,
+            "lead_score": s.lead_score,
+            "lead_status": s.lead_status,
+            "spam_flag": s.spam_flag,
+            "language": s.language,
+            "duration_seconds": s.duration_seconds,
+            "started_at_local": s.started_at_local.replace(tzinfo=dt_timezone.utc) if s.started_at_local else None,
         }
     )
 
@@ -333,10 +423,15 @@ def get_conversation_messages(
     returning any messages. Prevents cross-tenant message leakage.
     """
     # ── Ownership / Tenant Check ───────────────────────────────────────
+    query_id = session_id
+    id_filter = ChatSession.session_id == query_id
+    if is_valid_uuid(query_id):
+        id_filter = (ChatSession.session_uuid == query_id) | (ChatSession.session_id == query_id)
+
     session_exists = (
         db.query(ChatSession.session_id)
         .filter(
-            ChatSession.session_uuid == session_id,
+            id_filter,
             ChatSession.tenant_id == current_user.tenant_id,  # ← CRITICAL
             ChatSession.is_deleted == False,
         )
@@ -381,10 +476,13 @@ def intervene_in_conversation(
     Atomic agent takeover. Prevents race conditions via conditional DB update.
     Tenant isolation ensures agents can only intervene in their own tenant's sessions.
     """
+    query_id = session_id
+    id_filter = (ChatSession.session_uuid == query_id) if is_valid_uuid(query_id) else (ChatSession.session_id == query_id)
+
     stmt = (
         update(ChatSession)
         .where(
-            ChatSession.session_uuid == session_id,
+            id_filter,
             ChatSession.tenant_id == current_user.tenant_id,  # ← TENANT GUARD
             ChatSession.session_status == SessionStatus.ACTIVE,
             ChatSession.conversation_mode == ConversationMode.BOT,
@@ -393,7 +491,7 @@ def intervene_in_conversation(
         .values(
             conversation_mode=ConversationMode.HUMAN,
             assigned_agent_id=current_user.id,
-            assigned_at=datetime.utcnow(),
+            assigned_at=datetime.now(dt_timezone.utc),
             is_locked=True,
             version=ChatSession.version + 1,
         )
@@ -406,7 +504,7 @@ def intervene_in_conversation(
         existing = (
             db.query(ChatSession)
             .filter(
-                ChatSession.session_uuid == session_id,
+                id_filter,
                 ChatSession.tenant_id == current_user.tenant_id,
             )
             .first()
@@ -456,10 +554,15 @@ def connect_to_conversation(
     current_user: User = Depends(require_role(1)),
 ):
     """Agent claims a waiting conversation. Enforces single-agent lock."""
+    query_id = session_id
+    id_filter = ChatSession.session_id == query_id
+    if is_valid_uuid(query_id):
+        id_filter = (ChatSession.session_uuid == query_id) | (ChatSession.session_id == query_id)
+
     chat_session = (
         db.query(ChatSession)
         .filter(
-            ChatSession.session_uuid == session_id,
+            id_filter,
             ChatSession.tenant_id == current_user.tenant_id,
             ChatSession.session_status == SessionStatus.ACTIVE,
             ChatSession.is_deleted == False,
@@ -478,7 +581,7 @@ def connect_to_conversation(
 
     chat_session.conversation_mode = ConversationMode.HUMAN
     chat_session.assigned_agent_id = current_user.id
-    chat_session.assigned_at = datetime.utcnow()
+    chat_session.assigned_at = datetime.now(dt_timezone.utc)
     chat_session.is_locked = True
     chat_session.version += 1
     db.commit()
@@ -504,11 +607,16 @@ async def close_conversation(
     """Agent ends their turn. Hands back control to BOT. Tenant-isolated."""
     from app.models.chat_message import ChatMessage
 
+    query_id = session_id
+    id_filter = ChatSession.session_id == query_id
+    if is_valid_uuid(query_id):
+        id_filter = (ChatSession.session_uuid == query_id) | (ChatSession.session_id == query_id)
+
     # Verify session belongs to this tenant
     session = (
         db.query(ChatSession)
         .filter(
-            ChatSession.session_uuid == session_id,
+            id_filter,
             ChatSession.tenant_id == current_user.tenant_id,
             ChatSession.is_deleted == False,
         )
@@ -522,19 +630,20 @@ async def close_conversation(
     session.agent_joined = False
     session.assigned_agent_id = None
     session.is_locked = False
-    session.updated_at = datetime.utcnow()
+    session.updated_at = datetime.now(dt_timezone.utc)
     # Ensure is_active remains True
     session.is_active = True
     session.session_status = SessionStatus.ACTIVE
 
     # 1. Create Enterprise Handback Message
-    handback_text = f"Agent {current_user.full_name} has left the conversation. Our assistant will continue to help you."
+    agent_name_display = current_user.full_name or current_user.email.split('@')[0] or "An agent"
+    handback_text = f"Agent {agent_name_display} has left the conversation. Our assistant will continue to help you."
     handback_msg = ChatMessage(
         session_id=session.session_id,
         message_type="bot",
         message_text=handback_text,
-        created_at_utc=datetime.utcnow(),
-        created_at_local=datetime.utcnow(),
+        created_at_utc=datetime.now(dt_timezone.utc),
+        created_at_local=datetime.now(dt_timezone.utc),
     )
     db.add(handback_msg)
     db.commit()
@@ -546,12 +655,11 @@ async def close_conversation(
             "session_id": session_id,
             "message": handback_text,
             "sender": "bot",
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(dt_timezone.utc).isoformat()
         }
     )
     
     # 3. Notify CRM list (remove from agent's active list or update status)
-    from app.api.live_chat import _assemble_items
     session_item = _assemble_items([(session, None)], db)[0]
     await socket_manager.broadcast_event(
         "SESSION_UPDATED", 
@@ -611,3 +719,173 @@ async def dashboard_websocket(
     except Exception as e:
         logger.error(f"Dashboard WebSocket error for user {user_id}: {e}")
         socket_manager.disconnect(websocket, user_id)
+
+
+# ── Sales Controls ──────────────────────────────────────────────────────
+
+@router.post("/toggle-priority/{session_id}")
+async def toggle_priority(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(1)),
+):
+    """
+    Toggles lead_status between 'PRIORITY' and 'Cold'.
+    """
+    row = db.query(ChatSession, User.full_name.label("agent_name")).outerjoin(User, ChatSession.assigned_agent_id == User.id).filter(
+        ChatSession.session_uuid == session_id,
+        ChatSession.tenant_id == current_user.tenant_id,
+        ChatSession.is_deleted == False
+    ).first()
+    
+    if not row:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    session, agent_name = row
+    session.lead_status = "PRIORITY" if session.lead_status != "PRIORITY" else "Cold"
+    db.commit()
+    
+    # Broadcast update
+    session_item = _assemble_items([(session, agent_name)], db)[0]
+    await socket_manager.broadcast_event("SESSION_UPDATED", session_item.model_dump(mode="json"))
+    
+    return {"success": True, "lead_status": session.lead_status}
+
+
+@router.post("/toggle-spam/{session_id}")
+async def toggle_spam(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(1)),
+):
+    """
+    Toggles spam_flag and updates lead_status.
+    """
+    row = db.query(ChatSession, User.full_name.label("agent_name")).outerjoin(User, ChatSession.assigned_agent_id == User.id).filter(
+        ChatSession.session_uuid == session_id,
+        ChatSession.tenant_id == current_user.tenant_id,
+        ChatSession.is_deleted == False
+    ).first()
+    
+    if not row:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    session, agent_name = row
+    session.spam_flag = not session.spam_flag
+    if session.spam_flag:
+        session.lead_status = "SPAM"
+    else:
+        session.lead_status = "Cold"
+    
+    db.commit()
+    
+    # Broadcast update
+    session_item = _assemble_items([(session, agent_name)], db)[0]
+    await socket_manager.broadcast_event("SESSION_UPDATED", session_item.model_dump(mode="json"))
+    
+    return {"success": True, "spam_flag": session.spam_flag, "lead_status": session.lead_status}
+
+
+@router.post("/block-visitor/{session_id}")
+async def block_visitor(
+    session_id: str,
+    reason: Optional[str] = Query(default="Abusive behavior"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(1)),
+):
+    """
+    Blocks visitor by IP and Fingerprint, then closes the session.
+    """
+    row = db.query(ChatSession, User.full_name.label("agent_name")).outerjoin(User, ChatSession.assigned_agent_id == User.id).filter(
+        ChatSession.session_uuid == session_id,
+        ChatSession.tenant_id == current_user.tenant_id,
+        ChatSession.is_deleted == False
+    ).first()
+    
+    if not row:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    session, agent_name = row
+    
+    # 1. Create block record
+    block = BlockedVisitor(
+        tenant_id=current_user.tenant_id,
+        ip_address=session.initial_ip,
+        visitor_fingerprint=session.visitor_fingerprint,
+        reason=reason
+    )
+    db.add(block)
+    
+    # 2. Close session
+    session.session_status = SessionStatus.CLOSED
+    session.is_active = False
+    session.ended_at_utc = datetime.now(dt_timezone.utc)
+    
+    db.commit()
+    
+    # 3. Broadcast update
+    session_item = _assemble_items([(session, agent_name)], db)[0]
+    await socket_manager.broadcast_event("SESSION_UPDATED", session_item.model_dump(mode="json"))
+    
+    return {"success": True, "message": "Visitor blocked and session closed."}
+@router.post("/update-lead/{session_id}")
+async def update_lead_info(
+    session_id: str,
+    update_data: LeadUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(1)),
+):
+    """
+    Manually or automatically update lead contact information.
+    extracted from chat or manually entered by agent.
+    """
+    # 1. Find the session and its lead
+    # 🚨 SECURITY: Handle SQL Server UNIQUEIDENTIFIER conversion safety
+    if is_valid_uuid(session_id):
+        session = db.query(ChatSession).filter(
+            (ChatSession.session_uuid == session_id) | 
+            (ChatSession.session_id == session_id),
+            ChatSession.tenant_id == current_user.tenant_id,
+            ChatSession.is_deleted == False
+        ).first()
+    else:
+        session = db.query(ChatSession).filter(
+            ChatSession.session_id == session_id,
+            ChatSession.tenant_id == current_user.tenant_id,
+            ChatSession.is_deleted == False
+        ).first()
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    if not session.lead_id:
+        # Create lead if missing (though session_id usually covers this)
+        lead = Lead(id=session.session_id, tenant_id=current_user.tenant_id)
+        db.add(lead)
+        session.lead_id = lead.id
+    else:
+        lead = db.query(Lead).filter(Lead.id == session.lead_id).first()
+        if not lead:
+             lead = Lead(id=session.lead_id, tenant_id=current_user.tenant_id)
+             db.add(lead)
+
+    # 2. Update fields
+    if update_data.name: lead.name = update_data.name
+    if update_data.email: lead.email = update_data.email
+    if update_data.phone: lead.phone = update_data.phone
+    if update_data.company: lead.company = update_data.company
+    
+    db.commit()
+    db.refresh(lead)
+
+    # 3. Broadcast update to all dashboard viewers
+    agent_name = db.query(User.full_name).filter(User.id == session.assigned_agent_id).scalar()
+    session_item = _assemble_items([(session, agent_name)], db)[0]
+    await socket_manager.broadcast_event("SESSION_UPDATED", session_item.model_dump(mode="json"))
+
+    return {"success": True, "lead": {
+        "name": lead.name,
+        "email": lead.email,
+        "phone": lead.phone,
+        "company": lead.company
+    }}

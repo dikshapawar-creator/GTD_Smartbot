@@ -7,7 +7,7 @@ Enterprise hardened:
 - Clean resource cleanup
 """
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from jose import jwt, JWTError
 from sqlalchemy.orm import Session as DBSession
@@ -34,7 +34,7 @@ def _save_ws_message(
     db: DBSession, session_id: str, text: str, sender_type: str, tenant_id: int
 ):
     """Persist a WebSocket message to chat_messages with tenant/session scoping."""
-    now_utc = datetime.utcnow()
+    now_utc = datetime.now(timezone.utc)
     
     # Update session activity — scope by tenant_id for isolation safety
     chat_session = (
@@ -171,6 +171,25 @@ async def websocket_chat(
         # ── Message Loop ─────────────────────────────────────────────────
         while True:
             data = await websocket.receive_json()
+            msg_type = data.get("type", "message")
+
+            # ── Handle Typing Indicator ──────────────────────────────────
+            if msg_type == "typing":
+                is_typing = data.get("is_typing", False)
+                if role == "client":
+                    await manager.send_to_agent(session_id, {
+                        "type": "typing",
+                        "is_typing": is_typing,
+                        "sender": "user",
+                    })
+                else:
+                    await manager.send_to_client(session_id, {
+                        "type": "typing",
+                        "is_typing": is_typing,
+                        "sender": "agent",
+                    })
+                continue
+
             text = data.get("message", "").strip()
             if not text:
                 continue
@@ -186,7 +205,7 @@ async def websocket_chat(
                         "session_id": session_id,
                         "message": text,
                         "sender": "user",
-                        "timestamp": datetime.utcnow().isoformat()
+                        "timestamp": datetime.now(timezone.utc).isoformat()
                     }
                 )
 
@@ -237,7 +256,7 @@ async def websocket_chat(
                         "session_id": session_id,
                         "message": text,
                         "sender": "agent",
-                        "timestamp": datetime.utcnow().isoformat()
+                        "timestamp": datetime.now(timezone.utc).isoformat()
                     }
                 )
 
