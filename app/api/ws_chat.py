@@ -125,13 +125,12 @@ async def websocket_chat(
 
             user_tenant_id = agent.tenant_id
 
-            # Verify session belongs to agent's tenant
+            # Verify session belongs to agent's tenant (allow CLOSED sessions to be reactivated)
             chat_session = (
                 db.query(ChatSession)
                 .filter(
                     ChatSession.session_uuid == session_id,
                     ChatSession.tenant_id == user_tenant_id, # ← TENANT ISOLATION
-                    ChatSession.session_status == SessionStatus.ACTIVE,
                     ChatSession.is_deleted == False
                 )
                 .first()
@@ -139,6 +138,11 @@ async def websocket_chat(
             if not chat_session:
                 await websocket.close(code=4004, reason="Session not found in your tenant")
                 return
+
+            # Reactivate session if closed
+            if chat_session.session_status == SessionStatus.CLOSED:
+                 chat_session.session_status = SessionStatus.ACTIVE
+                 chat_session.status = "ACTIVE"
 
             # Sync bot-stop flag
             chat_session.agent_joined = True
@@ -151,18 +155,7 @@ async def websocket_chat(
 
             await manager.connect_agent(session_id, websocket)
 
-            # Notify client and persist system message
-            await manager.send_to_client(session_id, {
-                "type": "system",
-                "message": "A sales agent has joined the conversation.",
-                "sender": "system",
-            })
-            _save_ws_message(
-                db, session_id,
-                "A sales agent has joined the conversation.",
-                "system",
-                user_tenant_id
-            )
+            await manager.connect_agent(session_id, websocket)
 
         else:
             await websocket.close(code=4000, reason="Invalid role specified")
@@ -276,38 +269,8 @@ async def websocket_chat(
         elif role == "agent":
             manager.disconnect_agent(session_id)
             
-            # 🚨 REVERT STATUS ON DISCONNECT
-            chat_session = db.query(ChatSession).filter(ChatSession.session_uuid == session_id).first()
-            if chat_session and chat_session.session_status == SessionStatus.ACTIVE:
-                # ✅ Switch mode back to BOT so messages get routed to chatbot
-                chat_session.conversation_mode = ConversationMode.BOT
-                chat_session.agent_joined = False
-                chat_session.assigned_agent_id = None
-                db.commit()
-
-                handback_text = "The agent has left. The AI assistant has resumed."
-                # Notify client widget that bot has resumed
-                await manager.send_to_client(session_id, {
-                    "type": "system",
-                    "message": handback_text,
-                    "sender": "system",
-                    "mode": "BOT",
-                })
-                _save_ws_message(
-                    db, session_id,
-                    handback_text,
-                    "system",
-                    chat_session.tenant_id
-                )
-
-                # Broadcast update to dashboard
-                from app.core.socket_manager import socket_manager
-                from app.api.live_chat import _assemble_items
-                session_item = _assemble_items([(chat_session, None)], db)[0]
-                import asyncio
-                asyncio.create_task(socket_manager.broadcast_event(
-                    "SESSION_UPDATED",
-                    session_item.model_dump(mode="json")
-                ))
+            # Enterprise behavior: do NOT revert status or send handoff message on disconnect.
+            # Only clicking 'End Chat' in the CRM triggers the handoff.
+            logger.info({"event": "agent_ws_detached", "session_id": session_id})
 
         db.close()

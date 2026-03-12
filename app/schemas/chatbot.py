@@ -47,6 +47,9 @@ class ResponseType(str, Enum):
     MESSAGE = "MESSAGE"
     CTA = "CTA"
 
+class SessionInitRequest(BaseModel):
+    visitor_uuid: Optional[str] = None
+
 class SessionInitResponse(BaseModel):
     session_token: str
     message: str

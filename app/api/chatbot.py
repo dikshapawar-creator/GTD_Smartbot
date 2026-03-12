@@ -1,10 +1,7 @@
-"""
-Chatbot API — Simplified Production Core.
-Handles session initialization, messaging, and trade flow.
-"""
+import logging
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 from datetime import datetime, timezone
 
 from app.core.dependencies import get_db
@@ -13,6 +10,8 @@ from app.models.chat_session import ChatSession, SessionStatus, ConversationMode
 
 from app.models.chat_message import ChatMessage
 from app.models.blocked import BlockedVisitor
+
+logger = logging.getLogger(__name__)
 from app.services.chatbot import ChatbotService
 from app.services import session_service, intent_service, greeting_handler, lead_service
 from app.core import utils
@@ -21,14 +20,14 @@ from app.models.lead import Lead, LeadStatus
 from app.models.intent_config import IntentConfig
 from app.schemas.chatbot import (
     ChatMessageRequest, ChatMessageResponse, 
-    ResponseType, SessionInitResponse, ChatState
+    ResponseType, SessionInitResponse, SessionInitRequest, ChatState
 )
 
 router = APIRouter(prefix="/chat", tags=["Chatbot"])
 
 # ── 1. Session Initialization ──────────────────────────────────────────
 @router.post("/session/init", response_model=SessionInitResponse)
-async def initialize_session(request: Request, response: Response, db: Session = Depends(get_db)):
+async def initialize_session(request: Request, response: Response, init_req: Optional[SessionInitRequest] = None, db: Session = Depends(get_db)):
     """
     Initializes or restores a chatbot session.
     """
@@ -69,19 +68,53 @@ async def initialize_session(request: Request, response: Response, db: Session =
     from app.services import geo_service
     country, city, timezone_str = geo_service.lookup_ip_geo(client_ip)
 
-    new_session = session_service.create_session(
-        db, 
-        ip_address=client_ip,
-        country=country, 
-        city=city, 
-        timezone_str=timezone_str,
-        user_agent=meta["user_agent"],
-        browser=meta["browser"],
-        os_name=meta["os"],
-        device_type=meta["device_type"],
-        fingerprint=fingerprint,
-        tenant_id=settings.DEFAULT_TENANT_ID
-    )
+    visitor_uuid_ext = init_req.visitor_uuid if init_req else None
+    
+    # Check if returning visitor with an ACTIVE session
+    existing_session = None
+    is_returning = False
+    
+    if visitor_uuid_ext:
+        # 1. Try to find a currently ACTIVE session for this visitor
+        existing_session = db.query(ChatSession).filter(
+            ChatSession.visitor_uuid == visitor_uuid_ext,
+            ChatSession.session_status == SessionStatus.ACTIVE,
+            ChatSession.is_deleted == False
+        ).order_by(ChatSession.started_at_utc.desc()).first()
+
+        if existing_session:
+            # Update activity timestamp
+            existing_session.last_activity_utc = session_service._now_utc()
+            existing_session.last_seen_at = session_service._now_utc()
+            db.commit()
+            new_session = existing_session
+            is_returning = True
+            logger.info(f"Reusing active session {new_session.session_id} for visitor {visitor_uuid_ext}")
+        else:
+            # 2. If no active session, check for ANY prior history to flag as returning
+            prior_history = db.query(ChatSession).filter(
+                ChatSession.visitor_uuid == visitor_uuid_ext,
+                ChatSession.total_messages > 0,
+                ChatSession.is_deleted == False
+            ).first()
+            if prior_history:
+                is_returning = True
+
+    if not existing_session:
+        new_session = session_service.create_session(
+            db, 
+            ip_address=client_ip,
+            country=country, 
+            city=city, 
+            timezone_str=timezone_str,
+            user_agent=meta["user_agent"],
+            browser=meta["browser"],
+            os_name=meta["os"],
+            device_type=meta["device_type"],
+            fingerprint=fingerprint,
+            tenant_id=settings.DEFAULT_TENANT_ID,
+            visitor_uuid=visitor_uuid_ext
+        )
     
     # 🚨 COMMIT BEFORE BROADCAST
     db.commit()
@@ -97,7 +130,10 @@ async def initialize_session(request: Request, response: Response, db: Session =
     )
 
     # Fetch professional greeting from DB for consistency
-    greeting_res = greeting_handler.handle_greeting(db, new_session)
+    if is_returning:
+        greeting_res = {"message": "Welcome back 👋 How can I help today?"}
+    else:
+        greeting_res = greeting_handler.handle_greeting(db, new_session)
 
     response.set_cookie(
         key=settings.SESSION_COOKIE_NAME,
@@ -414,20 +450,38 @@ async def get_chat_history(request: Request, db: Session = Depends(get_db)):
     if not active_session:
         return []
 
-    messages = (
-        db.query(ChatMessage)
-        .filter(ChatMessage.session_id == session_id)
-        .order_by(ChatMessage.created_at_utc.asc())
-        .all()
-    )
+    if active_session.visitor_uuid and active_session.visitor_fingerprint:
+        messages = (
+            db.query(ChatMessage)
+            .join(ChatSession, ChatMessage.session_id == ChatSession.session_id)
+            .filter(
+                ChatSession.visitor_uuid == active_session.visitor_uuid,
+                ChatSession.visitor_fingerprint == active_session.visitor_fingerprint,
+                ChatSession.is_deleted == False
+            )
+            .order_by(ChatMessage.created_at_utc.desc())
+            .limit(50)
+            .all()
+        )
+        messages.reverse()
+    else:
+        messages = (
+            db.query(ChatMessage)
+            .filter(ChatMessage.session_id == active_session.session_id)
+            .order_by(ChatMessage.created_at_utc.asc())
+            .all()
+        )
 
     # Map database models to ChatMessageResponse schema
     history = []
     for m in messages:
+        # Determine format based on structure (tuple from join vs direct instance)
+        msg_obj = m[0] if isinstance(m, tuple) else m
+        
         history.append({
             "sessionId": str(active_session.session_uuid),
-            "message": m.message_text,
-            "role": m.message_type, # Frontend expects 'role' for UI
+            "message": msg_obj.message_text,
+            "role": msg_obj.message_type, # Frontend expects 'role' for UI
             "state": active_session.chat_state, # Defaulting to current state
             "type": ResponseType.MESSAGE,
             "conversation_status": active_session.conversation_mode,

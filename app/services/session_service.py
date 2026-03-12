@@ -46,6 +46,7 @@ def create_session(
     device_type: str = "Desktop",
     fingerprint: Optional[str] = None,
     tenant_id: int = 1,
+    visitor_uuid: Optional[str] = None,
 ) -> ChatSession:
     """Creates a new session with senior IP & metadata tracking.
     
@@ -60,6 +61,8 @@ def create_session(
         session_id = str(s_uuid)
         now_utc = _now_utc()
         now_local = _to_local(now_utc, timezone_str)
+        
+        v_uuid = visitor_uuid or str(uuid4())
 
         chat_session = ChatSession(
             session_id=session_id,
@@ -69,6 +72,7 @@ def create_session(
             last_seen_ip=ip_address,
             last_seen_at=now_utc,
             visitor_fingerprint=fingerprint,
+            visitor_uuid=v_uuid,
             user_agent=user_agent,
             browser=browser,
             os=os_name,

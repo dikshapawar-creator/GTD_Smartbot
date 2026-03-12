@@ -486,11 +486,13 @@ def intervene_in_conversation(
         .where(
             id_filter,
             ChatSession.tenant_id == current_user.tenant_id,  # ← TENANT GUARD
-            ChatSession.session_status == SessionStatus.ACTIVE,
+            # Removed: ChatSession.session_status == SessionStatus.ACTIVE
             ChatSession.conversation_mode == ConversationMode.BOT,
             ChatSession.is_deleted == False,
         )
         .values(
+            session_status=SessionStatus.ACTIVE, # Reactivate closed sessions
+            status="ACTIVE",
             conversation_mode=ConversationMode.HUMAN,
             assigned_agent_id=current_user.id,
             assigned_at=datetime.now(dt_timezone.utc),
@@ -537,6 +539,39 @@ def intervene_in_conversation(
         )
 
     background_tasks.add_task(_broadcast)
+
+    # 3. Create Enterprise Join Message (First time only)
+    join_text = "A sales agent has joined the conversation."
+    join_msg = ChatMessage(
+        session_id=session_id,
+        message_type="system",
+        message_text=join_text,
+        created_at_utc=datetime.now(dt_timezone.utc),
+        created_at_local=datetime.now(dt_timezone.utc),
+    )
+    db.add(join_msg)
+    db.commit()
+
+    # 4. Notify CRM Dashboard & Visitor Widget
+    background_tasks.add_task(
+        socket_manager.broadcast_event,
+        "NEW_SYSTEM_MESSAGE",
+        {
+            "session_id": session_id,
+            "message": join_text,
+            "sender": "system",
+        }
+    )
+    from app.services.websocket_manager import manager
+    background_tasks.add_task(
+        manager.send_to_client,
+        session_id,
+        {
+            "type": "system",
+            "message": join_text,
+            "sender": "system",
+        }
+    )
 
     return {
         "success": True,
@@ -640,7 +675,7 @@ async def close_conversation(
     session.chat_state = ChatState.START
 
     # 1. Create Enterprise Handback Message
-    handback_text = "The agent has left. The AI assistant has resumed."
+    handback_text = "The agent has left the conversation."
     handback_msg = ChatMessage(
         session_id=session.session_id,
         message_type="system",
