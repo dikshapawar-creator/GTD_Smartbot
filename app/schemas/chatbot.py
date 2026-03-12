@@ -254,14 +254,6 @@ class LeadSubmitRequest(BaseModel):
 
 
 
-class ConversationResponse(BaseModel):
-    id: int # Changed to int for BIGINT PK compatibility
-    lead_id: str
-    message: str
-    sender: str
-    timestamp: datetime
-    model_config = ConfigDict(from_attributes=True)
-
 class PaginatedLeadResponse(BaseModel):
     total: int
     page: int

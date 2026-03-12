@@ -29,6 +29,8 @@ from app.models.chat_message import ChatMessage
 from app.models.lead import Lead
 from app.models.blocked import BlockedVisitor
 from app.core.socket_manager import socket_manager
+from app.services.websocket_manager import manager
+from app.schemas.chatbot import ChatState
 
 logger = logging.getLogger(__name__)
 
@@ -634,13 +636,14 @@ async def close_conversation(
     # Ensure is_active remains True
     session.is_active = True
     session.session_status = SessionStatus.ACTIVE
+    # 🚨 RESET STATE: Allow bot to respond again by clearing "silent" handoff state
+    session.chat_state = ChatState.START
 
     # 1. Create Enterprise Handback Message
-    agent_name_display = current_user.full_name or current_user.email.split('@')[0] or "An agent"
-    handback_text = f"Agent {agent_name_display} has left the conversation. Our assistant will continue to help you."
+    handback_text = "The agent has left. The AI assistant has resumed."
     handback_msg = ChatMessage(
         session_id=session.session_id,
-        message_type="bot",
+        message_type="system",
         message_text=handback_text,
         created_at_utc=datetime.now(dt_timezone.utc),
         created_at_local=datetime.now(dt_timezone.utc),
@@ -649,15 +652,12 @@ async def close_conversation(
     db.commit()
 
     # 2. Broadcast to client (so they see the bot is back)
-    await socket_manager.broadcast_event(
-        "NEW_MESSAGE",
-        {
-            "session_id": session_id,
-            "message": handback_text,
-            "sender": "bot",
-            "timestamp": datetime.now(dt_timezone.utc).isoformat()
-        }
-    )
+    await manager.send_to_client(session_id, {
+        "type": "system",
+        "message": handback_text,
+        "sender": "system",
+        "mode": "BOT"
+    })
     
     # 3. Notify CRM list (remove from agent's active list or update status)
     session_item = _assemble_items([(session, None)], db)[0]

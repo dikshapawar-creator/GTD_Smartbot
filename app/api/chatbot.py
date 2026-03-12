@@ -21,7 +21,7 @@ from app.models.lead import Lead, LeadStatus
 from app.models.intent_config import IntentConfig
 from app.schemas.chatbot import (
     ChatMessageRequest, ChatMessageResponse, 
-    ConversationResponse, ResponseType, SessionInitResponse, ChatState
+    ResponseType, SessionInitResponse, ChatState
 )
 
 router = APIRouter(prefix="/chat", tags=["Chatbot"])

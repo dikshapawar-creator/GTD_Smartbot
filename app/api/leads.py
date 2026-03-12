@@ -17,7 +17,6 @@ from app.models.chat_session import ChatSession, SessionStatus, ConversationMode
 
 from app.schemas.chatbot import (
     LeadResponse, 
-    ConversationResponse, 
     LeadSubmitRequest, 
     StatusUpdateRequest, 
     LeadStatusHistoryResponse,

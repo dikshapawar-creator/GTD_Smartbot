@@ -285,16 +285,17 @@ async def websocket_chat(
                 chat_session.assigned_agent_id = None
                 db.commit()
 
+                handback_text = "The agent has left. The AI assistant has resumed."
                 # Notify client widget that bot has resumed
                 await manager.send_to_client(session_id, {
                     "type": "system",
-                    "message": "The agent has left. The AI assistant has resumed.",
+                    "message": handback_text,
                     "sender": "system",
                     "mode": "BOT",
                 })
                 _save_ws_message(
                     db, session_id,
-                    "The agent has left. The AI assistant has resumed.",
+                    handback_text,
                     "system",
                     chat_session.tenant_id
                 )

@@ -17,7 +17,6 @@ from app.db.session import Base
 from app.models.chat_session import ChatSession
 from app.models.chat_message import ChatMessage
 from app.models.lead import Lead
-from app.models.conversation import Conversation
 from app.core.config import settings
 
 # this is the Alembic Config object, which provides
