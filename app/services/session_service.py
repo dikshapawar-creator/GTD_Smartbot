@@ -72,7 +72,7 @@ def create_session(
             session_id=session_id,
             session_uuid=s_uuid,
             tenant_id=tenant_id,
-            visitor_uuid=v_uuid,
+            visitor_uuid=v_uuid,   # Explicitly pass the generated UUID
             initial_ip=ip_address,
             last_seen_ip=ip_address,
             last_seen_at=now_utc,

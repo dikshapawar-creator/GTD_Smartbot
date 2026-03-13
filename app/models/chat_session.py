@@ -47,7 +47,7 @@ class ChatSession(Base):
     last_seen_ip = Column(String(45), nullable=True) # Tracks mobile rotation
     last_seen_at = Column(DateTime, nullable=True)
     visitor_fingerprint = Column(String(12), nullable=True, index=True) # Device identity
-    visitor_uuid = Column(String(36), nullable=False, index=True, default=lambda: str(uuid.uuid4())) # Required browser identity fallback
+    visitor_uuid = Column(String(64), nullable=False, index=True) # Required browser identity
     
     # Geolocation
     country = Column(String(100), nullable=True)
