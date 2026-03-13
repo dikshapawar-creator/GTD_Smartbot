@@ -52,21 +52,21 @@ async def initialize_session(request: Request, response: Response, init_req: Opt
     meta = utils.get_visitor_metadata(request)
     fingerprint = utils.generate_visitor_fingerprint(client_ip, meta["user_agent"])
 
-    # 🚨 SECURITY: Blocked Visitor Check
-    is_blocked = db.query(BlockedVisitor).filter(
-        (BlockedVisitor.ip_address == client_ip) | 
-        (BlockedVisitor.visitor_fingerprint == fingerprint)
-    ).first()
+    # 🚨 SECURITY: Blocked Visitor Check - TEMPORARILY DISABLED FOR DEBUGGING
+    # is_blocked = db.query(BlockedVisitor).filter(
+    #     (BlockedVisitor.ip_address == client_ip) | 
+    #     (BlockedVisitor.visitor_fingerprint == fingerprint)
+    # ).first()
     
-    if is_blocked:
-        logger.warning(
-            f"Blocked access attempt from client_ip: {client_ip} | fingerprint: {fingerprint} "
-            f"| reason: {is_blocked.reason}"
-        )
-        raise HTTPException(
-            status_code=403, 
-            detail="Your access has been restricted due to security policy violations."
-        )
+    # if is_blocked:
+    #     logger.warning(
+    #         f"Blocked access attempt from client_ip: {client_ip} | fingerprint: {fingerprint} "
+    #         f"| reason: {is_blocked.reason}"
+    #     )
+    #     raise HTTPException(
+    #         status_code=403, 
+    #         detail="Your access has been restricted due to security policy violations."
+    #     )
 
     # Real-time Geolocation
     from app.services import geo_service

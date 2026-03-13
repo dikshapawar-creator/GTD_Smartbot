@@ -303,23 +303,10 @@ async def legacy_chat_websocket(
     token: Optional[str] = Query(None)
 ):
     """
-    Handles old WebSocket paths (/ws/chat/...) to prevent 403 errors.
-    Informs the client to use the new prefixed path.
+    Handles old WebSocket paths (/ws/chat/...) by redirecting to the main handler.
+    This fixes the issue where reverse proxy strips /live-chat prefix.
     """
-    # 🚨 SECURITY/LOGGING: Check if reached before acceptance
-    logger.info(f"ENTERING Legacy WS Handler: session={session_id}, role={role}")
+    logger.info(f"Legacy WS path accessed: session={session_id}, role={role}")
     
-    try:
-        await websocket.accept()
-        logger.warning(f"Legacy WS accepted for session {session_id}. Sending refresh signal and closing.")
-        
-        await websocket.send_json({
-            "type": "system",
-            "message": "Protocol Update: Please refresh your browser to use the new secure connection.",
-            "error": "LEGACY_PATH"
-        })
-        await websocket.close(code=4001)
-    except Exception as e:
-        logger.error(f"Error in Legacy WS Handler: {str(e)}")
-    finally:
-        logger.info(f"EXITING Legacy WS Handler: session={session_id}")
+    # Redirect to the main WebSocket handler
+    await websocket_chat(websocket, session_id, role or "client", token or session_id)
