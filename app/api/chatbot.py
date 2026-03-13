@@ -59,6 +59,10 @@ async def initialize_session(request: Request, response: Response, init_req: Opt
     ).first()
     
     if is_blocked:
+        logger.warning(
+            f"Blocked access attempt from client_ip: {client_ip} | fingerprint: {fingerprint} "
+            f"| reason: {is_blocked.reason}"
+        )
         raise HTTPException(
             status_code=403, 
             detail="Your access has been restricted due to security policy violations."

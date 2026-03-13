@@ -14,6 +14,7 @@ from app.models.auth import User
 from app.api.deps import require_role
 from app.models.lead import Lead, LeadStatusHistory, LeadStatus
 from app.models.chat_session import ChatSession, SessionStatus, ConversationMode
+from app.core.utils import is_valid_uuid
 
 from app.schemas.chatbot import (
     LeadResponse, 
@@ -72,12 +73,14 @@ async def submit_lead(
         # 1. Get Session & Tenant (if possible)
         session_id = request.cookies.get(settings.SESSION_COOKIE_NAME)
         chat_session = None
-        current_tenant_id = 1 # Default
+        current_tenant_id = settings.DEFAULT_TENANT_ID # Use system default instead of hardcoded 1
 
-        if session_id:
+        if session_id and is_valid_uuid(session_id):
             chat_session = db.query(ChatSession).filter(ChatSession.session_uuid == session_id).first()
             if chat_session:
                 current_tenant_id = chat_session.tenant_id
+        elif session_id:
+             logger.warning(f"Invalid session_id cookie received during lead submission: {session_id}")
 
         # 2. Process Lead (Create or Update Duplicate)
         lead, is_duplicate = lead_service.create_or_update_lead(
@@ -113,8 +116,13 @@ async def submit_lead(
         }
     except IntegrityError as e:
         db.rollback()
-        logger.error(f"[LeadSubmit] Database integrity error: {e}")
-        raise HTTPException(status_code=409, detail="A lead with this email already exists.")
+        error_msg = str(e.orig) if hasattr(e, 'orig') else str(e)
+        logger.error(f"[LeadSubmit] Database integrity error: {error_msg}")
+        
+        if "FOREIGN KEY" in error_msg:
+             raise HTTPException(status_code=500, detail="Administrative Error: Linked resource (Tenant/User) not found. Please contact support.")
+        
+        raise HTTPException(status_code=409, detail="A lead with this email or phone already exists.")
     except Exception as e:
         db.rollback()
         logger.exception(f"[LeadSubmit] Unexpected error: {e}")

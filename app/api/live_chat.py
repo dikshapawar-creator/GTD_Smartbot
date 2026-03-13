@@ -32,19 +32,13 @@ from app.models.blocked import BlockedVisitor
 from app.core.socket_manager import socket_manager
 from app.services.websocket_manager import manager
 from app.schemas.chatbot import ChatState
+from app.core.utils import is_valid_uuid
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/live-chat", tags=["Live Chat"])
 
-def is_valid_uuid(val: str) -> bool:
-    """Helper to check if a string is a valid UUID before querying UNIQUEIDENTIFIER columns."""
-    import uuid
-    try:
-        uuid.UUID(str(val))
-        return True
-    except ValueError:
-        return False
+
 
 
 # ── Response Schemas ────────────────────────────────────────────────────

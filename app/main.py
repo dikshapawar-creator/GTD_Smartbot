@@ -13,7 +13,7 @@ from app.api.roles import router as roles_router
 from app.api.admin import router as admin_router
 from app.api.sales import router as sales_router
 from app.api.live_chat import router as live_chat_router
-from app.api.ws_chat import router as ws_router
+from app.api.ws_chat import router as ws_router, legacy_router as legacy_ws_router
 
 # ── Simplified Production-Ready Logging ──────────────────────────────
 logging.basicConfig(
@@ -124,6 +124,7 @@ def create_app() -> FastAPI:
     app.include_router(leads_router)
     app.include_router(live_chat_router)
     app.include_router(ws_router)
+    app.include_router(legacy_ws_router)
     app.include_router(intents_router)
     app.include_router(admin_router)
     app.include_router(sales_router)

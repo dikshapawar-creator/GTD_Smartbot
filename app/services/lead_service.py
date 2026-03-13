@@ -97,11 +97,11 @@ def create_or_update_lead(
     normalized_email = lead_req.business_email.strip().lower()
     normalized_phone = lead_req.contact_number.strip()
 
-    # 1. Primary check: Existing lead by email or phone
+    # 1. Primary check: Existing lead by email or phone. 
+    # NOTE: We remove 'is_deleted == False' to prevent 409 Conflict when re-submitting a deleted lead.
     lead = db.query(Lead).filter(
         (Lead.email == normalized_email) | (Lead.phone == normalized_phone),
-        Lead.tenant_id == tenant_id,
-        Lead.is_deleted == False
+        Lead.tenant_id == tenant_id
     ).first()
 
     # 2. Secondary check: Existing session-based lead (IN_PROGRESS)
@@ -120,6 +120,7 @@ def create_or_update_lead(
         lead.email = normalized_email
         lead.phone = normalized_phone
         lead.status = LeadStatus.NEW # Promote to NEW
+        lead.is_deleted = False      # 🔥 Restore if it was deleted
         lead.updated_at = datetime.now(timezone.utc)
         
         # Log promotion

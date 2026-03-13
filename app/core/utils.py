@@ -67,7 +67,18 @@ def get_visitor_metadata(request: Request) -> Dict[str, str]:
 def generate_visitor_fingerprint(ip: str, user_agent: str) -> str:
     """
     Generates a unique, privacy-respecting fingerprint for a visitor.
-    Hash is truncated to 8 characters for readability.
+    Hash is truncated to 12 characters for durability.
     """
     raw_str = f"{ip}|{user_agent}"
     return hashlib.sha256(raw_str.encode()).hexdigest()[:12]
+
+def is_valid_uuid(val: str) -> bool:
+    """Helper to check if a string is a valid UUID before querying UUID columns."""
+    import uuid
+    try:
+        if not val or len(str(val)) < 32:
+            return False
+        uuid.UUID(str(val))
+        return True
+    except (ValueError, AttributeError):
+        return False

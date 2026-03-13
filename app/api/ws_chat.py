@@ -8,6 +8,7 @@ Enterprise hardened:
 """
 import logging
 from datetime import datetime, timezone
+from typing import Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from jose import jwt, JWTError
 from sqlalchemy.orm import Session as DBSession
@@ -23,6 +24,7 @@ from app.services.websocket_manager import manager
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/live-chat", tags=["WebSocket"])
+legacy_router = APIRouter(tags=["Legacy WebSocket"]) # No prefix
 
 
 def _get_db_session() -> DBSession:
@@ -290,3 +292,34 @@ async def websocket_chat(
             logger.info({"event": "agent_ws_detached", "session_id": session_id})
 
         db.close()
+
+
+# ── Legacy WebSocket Catch-all ───────────────────────────────────────
+@legacy_router.websocket("/ws/chat/{session_id}")
+async def legacy_chat_websocket(
+    websocket: WebSocket, 
+    session_id: str,
+    role: Optional[str] = Query(None),
+    token: Optional[str] = Query(None)
+):
+    """
+    Handles old WebSocket paths (/ws/chat/...) to prevent 403 errors.
+    Informs the client to use the new prefixed path.
+    """
+    # 🚨 SECURITY/LOGGING: Check if reached before acceptance
+    logger.info(f"ENTERING Legacy WS Handler: session={session_id}, role={role}")
+    
+    try:
+        await websocket.accept()
+        logger.warning(f"Legacy WS accepted for session {session_id}. Sending refresh signal and closing.")
+        
+        await websocket.send_json({
+            "type": "system",
+            "message": "Protocol Update: Please refresh your browser to use the new secure connection.",
+            "error": "LEGACY_PATH"
+        })
+        await websocket.close(code=4001)
+    except Exception as e:
+        logger.error(f"Error in Legacy WS Handler: {str(e)}")
+    finally:
+        logger.info(f"EXITING Legacy WS Handler: session={session_id}")
