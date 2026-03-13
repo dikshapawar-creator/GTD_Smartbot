@@ -20,11 +20,13 @@ class ConnectionManager:
     # ── Connect ──────────────────────────────────────────────────────────
 
     async def connect_client(self, session_id: str, ws: WebSocket):
+        session_id = session_id.lower()
         await ws.accept()
         self._clients[session_id] = ws
         logger.info({"event": "ws_client_connected", "session_id": session_id})
 
     async def connect_agent(self, session_id: str, ws: WebSocket):
+        session_id = session_id.lower()
         await ws.accept()
         self._agents[session_id] = ws
         logger.info({"event": "ws_agent_connected", "session_id": session_id})
@@ -32,16 +34,19 @@ class ConnectionManager:
     # ── Disconnect ───────────────────────────────────────────────────────
 
     def disconnect_client(self, session_id: str):
+        session_id = session_id.lower()
         self._clients.pop(session_id, None)
         logger.info({"event": "ws_client_disconnected", "session_id": session_id})
 
     def disconnect_agent(self, session_id: str):
+        session_id = session_id.lower()
         self._agents.pop(session_id, None)
         logger.info({"event": "ws_agent_disconnected", "session_id": session_id})
 
     # ── Send ─────────────────────────────────────────────────────────────
 
     async def send_to_client(self, session_id: str, data: dict):
+        session_id = session_id.lower()
         ws = self._clients.get(session_id)
         if ws:
             try:
@@ -50,6 +55,7 @@ class ConnectionManager:
                 self.disconnect_client(session_id)
 
     async def send_to_agent(self, session_id: str, data: dict):
+        session_id = session_id.lower()
         ws = self._agents.get(session_id)
         if ws:
             try:
@@ -60,10 +66,10 @@ class ConnectionManager:
     # ── Utilities ────────────────────────────────────────────────────────
 
     def has_client(self, session_id: str) -> bool:
-        return session_id in self._clients
+        return session_id.lower() in self._clients
 
     def has_agent(self, session_id: str) -> bool:
-        return session_id in self._agents
+        return session_id.lower() in self._agents
 
 
 # Singleton instance — imported by ws_chat and live_chat

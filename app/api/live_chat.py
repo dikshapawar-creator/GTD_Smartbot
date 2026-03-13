@@ -8,6 +8,7 @@ Enterprise hardened:
 - Atomic intervention with BackgroundTasks for broadcasts
 """
 import logging
+import uuid
 from typing import List, Optional, Dict
 from datetime import datetime, timedelta, timezone as dt_timezone
 
@@ -351,14 +352,13 @@ def get_conversation_detail(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(1)),
 ):
-    """
-    Returns full detail for a single session including lead_email.
-    Enforces tenant isolation — 404 if session belongs to another tenant.
-    """
+    """Returns full detail for a single session including lead_email. Lowercase safe."""
+    session_id = session_id.lower()
+    session_id = session_id.lower()
     query_id = session_id
     id_filter = ChatSession.session_id == query_id
     if is_valid_uuid(query_id):
-        id_filter = (ChatSession.session_uuid == query_id) | (ChatSession.session_id == query_id)
+        id_filter = (ChatSession.session_uuid == uuid.UUID(query_id)) | (ChatSession.session_id == query_id)
 
     row = (
         db.query(ChatSession, User.full_name.label("agent_name"))
@@ -420,11 +420,9 @@ def get_conversation_messages(
     page_size: int = Query(default=50, ge=1, le=200),
 ):
     """
-    Paginated message retrieval for a session.
-    SECURITY: Verifies session belongs to the current user's tenant before
-    returning any messages. Prevents cross-tenant message leakage.
+    Paginated message retrieval for a session. Lowercase safe.
     """
-    # ── Ownership / Tenant Check ───────────────────────────────────────
+    session_id = session_id.lower()
     query_id = session_id
     id_filter = ChatSession.session_id == query_id
     if is_valid_uuid(query_id):
@@ -478,8 +476,11 @@ def intervene_in_conversation(
     Atomic agent takeover. Prevents race conditions via conditional DB update.
     Tenant isolation ensures agents can only intervene in their own tenant's sessions.
     """
+    session_id = session_id.lower()
     query_id = session_id
-    id_filter = (ChatSession.session_uuid == query_id) if is_valid_uuid(query_id) else (ChatSession.session_id == query_id)
+    id_filter = (ChatSession.session_id == query_id)
+    if is_valid_uuid(query_id):
+        id_filter = (ChatSession.session_uuid == uuid.UUID(query_id)) | (ChatSession.session_id == query_id)
 
     stmt = (
         update(ChatSession)
@@ -591,10 +592,11 @@ def connect_to_conversation(
     current_user: User = Depends(require_role(1)),
 ):
     """Agent claims a waiting conversation. Enforces single-agent lock."""
+    session_id = session_id.lower()
     query_id = session_id
-    id_filter = ChatSession.session_id == query_id
+    id_filter = (ChatSession.session_id == query_id)
     if is_valid_uuid(query_id):
-        id_filter = (ChatSession.session_uuid == query_id) | (ChatSession.session_id == query_id)
+        id_filter = (ChatSession.session_uuid == uuid.UUID(query_id)) | (ChatSession.session_id == query_id)
 
     chat_session = (
         db.query(ChatSession)
@@ -643,11 +645,14 @@ async def close_conversation(
 ):
     """Agent ends their turn. Hands back control to BOT. Tenant-isolated."""
     from app.models.chat_message import ChatMessage
+    session_id = session_id.lower()
+    logger.info(f"Session close requested for {session_id} by agent {current_user.id}")
 
     query_id = session_id
-    id_filter = ChatSession.session_id == query_id
+    # Use normalized ID for query
+    id_filter = (ChatSession.session_id == query_id)
     if is_valid_uuid(query_id):
-        id_filter = (ChatSession.session_uuid == query_id) | (ChatSession.session_id == query_id)
+        id_filter = (ChatSession.session_uuid == uuid.UUID(query_id)) | (ChatSession.session_id == query_id)
 
     # Verify session belongs to this tenant
     session = (
@@ -767,8 +772,9 @@ async def toggle_priority(
     """
     Toggles lead_status between 'PRIORITY' and 'Cold'.
     """
+    session_id = session_id.lower()
     row = db.query(ChatSession, User.full_name.label("agent_name")).outerjoin(User, ChatSession.assigned_agent_id == User.id).filter(
-        ChatSession.session_uuid == session_id,
+        (ChatSession.session_uuid == uuid.UUID(session_id)) if is_valid_uuid(session_id) else (ChatSession.session_id == session_id),
         ChatSession.tenant_id == current_user.tenant_id,
         ChatSession.is_deleted == False
     ).first()
@@ -796,8 +802,9 @@ async def toggle_spam(
     """
     Toggles spam_flag and updates lead_status.
     """
+    session_id = session_id.lower()
     row = db.query(ChatSession, User.full_name.label("agent_name")).outerjoin(User, ChatSession.assigned_agent_id == User.id).filter(
-        ChatSession.session_uuid == session_id,
+        (ChatSession.session_uuid == uuid.UUID(session_id)) if is_valid_uuid(session_id) else (ChatSession.session_id == session_id),
         ChatSession.tenant_id == current_user.tenant_id,
         ChatSession.is_deleted == False
     ).first()
@@ -831,8 +838,9 @@ async def block_visitor(
     """
     Blocks visitor by IP and Fingerprint, then closes the session.
     """
+    session_id = session_id.lower()
     row = db.query(ChatSession, User.full_name.label("agent_name")).outerjoin(User, ChatSession.assigned_agent_id == User.id).filter(
-        ChatSession.session_uuid == session_id,
+        (ChatSession.session_uuid == uuid.UUID(session_id)) if is_valid_uuid(session_id) else (ChatSession.session_id == session_id),
         ChatSession.tenant_id == current_user.tenant_id,
         ChatSession.is_deleted == False
     ).first()
@@ -875,10 +883,11 @@ async def update_lead_info(
     extracted from chat or manually entered by agent.
     """
     # 1. Find the session and its lead
+    session_id = session_id.lower()
     # 🚨 SECURITY: Handle SQL Server UNIQUEIDENTIFIER conversion safety
     if is_valid_uuid(session_id):
         session = db.query(ChatSession).filter(
-            (ChatSession.session_uuid == session_id) | 
+            (ChatSession.session_uuid == uuid.UUID(session_id)) | 
             (ChatSession.session_id == session_id),
             ChatSession.tenant_id == current_user.tenant_id,
             ChatSession.is_deleted == False

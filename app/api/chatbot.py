@@ -151,7 +151,7 @@ async def initialize_session(request: Request, response: Response, init_req: Opt
         "type": "CTA",
         "cta_label": "Book Demo",
         "action": "OPEN_LEAD_FORM",
-        "conversation_status": ConversationMode.BOT,
+        "conversation_status": new_session.conversation_mode,
     }
 
 

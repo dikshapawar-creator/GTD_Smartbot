@@ -37,10 +37,11 @@ def _save_ws_message(
     now_utc = datetime.now(timezone.utc)
     
     # Update session activity — scope by tenant_id for isolation safety
+    import uuid
     chat_session = (
         db.query(ChatSession)
         .filter(
-            ChatSession.session_uuid == session_id,
+            ChatSession.session_uuid == uuid.UUID(session_id),
             ChatSession.tenant_id == tenant_id,
             ChatSession.is_deleted == False
         )
@@ -87,10 +88,11 @@ async def websocket_chat(
                 return
             
             # Fetch session to get tenant_id for later message persists
+            import uuid
             chat_session = (
                 db.query(ChatSession)
                 .filter(
-                    ChatSession.session_uuid == session_id, 
+                    ChatSession.session_uuid == uuid.UUID(session_id), 
                     ChatSession.session_status == SessionStatus.ACTIVE, 
                     ChatSession.is_deleted == False
                 )
@@ -126,10 +128,11 @@ async def websocket_chat(
             user_tenant_id = agent.tenant_id
 
             # Verify session belongs to agent's tenant (allow CLOSED sessions to be reactivated)
+            import uuid
             chat_session = (
                 db.query(ChatSession)
                 .filter(
-                    ChatSession.session_uuid == session_id,
+                    ChatSession.session_uuid == uuid.UUID(session_id),
                     ChatSession.tenant_id == user_tenant_id, # ← TENANT ISOLATION
                     ChatSession.is_deleted == False
                 )
@@ -155,8 +158,6 @@ async def websocket_chat(
 
             await manager.connect_agent(session_id, websocket)
 
-            await manager.connect_agent(session_id, websocket)
-
         else:
             await websocket.close(code=4000, reason="Invalid role specified")
             return
@@ -171,21 +172,27 @@ async def websocket_chat(
                 is_typing = data.get("is_typing", False)
                 if role == "client":
                     await manager.send_to_agent(session_id, {
-                        "type": "typing",
+                        "type": "TYPING_EVENT",
                         "is_typing": is_typing,
                         "sender": "user",
+                        "session_id": session_id,
                     })
                 else:
                     await manager.send_to_client(session_id, {
-                        "type": "typing",
+                        "type": "TYPING_EVENT",
                         "is_typing": is_typing,
                         "sender": "agent",
+                        "session_id": session_id,
                     })
                 continue
 
             text = data.get("message", "").strip()
             if not text:
+                logger.debug(f"Ignoring empty message in session {session_id}")
                 continue
+
+            # Standardize session ID for lookups
+            normalized_sid = session_id.lower()
 
             if role == "client":
                 _save_ws_message(db, session_id, text, "user", user_tenant_id)
@@ -204,12 +211,14 @@ async def websocket_chat(
 
                 # ✅ ALWAYS re-fetch session mode from DB to avoid stale cache
                 db.expire_all()  # Force SQLAlchemy to reload from DB
+                import uuid
                 fresh_session = db.query(ChatSession).filter(
-                    ChatSession.session_uuid == session_id
+                    ChatSession.session_uuid == uuid.UUID(session_id)
                 ).first()
 
                 if fresh_session and fresh_session.conversation_mode == ConversationMode.HUMAN:
                     # Agent is handling — forward to agent WS
+                    logger.info(f"Relaying client message to agent for session {session_id}")
                     await manager.send_to_agent(session_id, {
                         "type": "message",
                         "message": text,
@@ -253,11 +262,17 @@ async def websocket_chat(
                     }
                 )
 
-                await manager.send_to_client(session_id, {
-                    "type": "message",
-                    "message": text,
-                    "sender": "agent",
-                })
+                normalized_sid = session_id.lower()
+                if manager.has_client(normalized_sid):
+                    logger.info(f"Relaying agent message to client for session {normalized_sid}")
+                    await manager.send_to_client(normalized_sid, {
+                        "type": "message",
+                        "message": text,
+                        "sender": "agent",
+                    })
+                else:
+                    logger.warning(f"Failed to relay agent message: Client not connected for session {normalized_sid}")
+                    logger.info(f"Active clients in manager: {list(manager._clients.keys())}")
 
     except WebSocketDisconnect:
         logger.info({"event": "ws_disconnect", "session_id": session_id, "role": role})

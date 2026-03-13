@@ -42,12 +42,27 @@ class ChatbotService:
         session_service.save_message(db, chat_session, user_message, "user")
 
         # 2. Backward compatibility: Find or create lead tied to this session
-        lead = db.query(Lead).filter(Lead.id == chat_session.session_id).first()
+        lead = None
+        if chat_session.lead_id:
+             lead = db.query(Lead).filter(Lead.id == chat_session.lead_id).first()
+             
         if not lead:
              # If no lead exists for this session yet, create one
-             lead = Lead(id=chat_session.session_id, status="IN_PROGRESS")
+             # 🚨 SECURITY: Provide default values for required B2B fields to avoid SQL IntegrityError
+             placeholder_email = f"pending_{chat_session.session_id}@gtdservice.local"
+             lead = Lead(
+                 name="Visitor",
+                 email=placeholder_email, # email is required in model
+                 phone="Pending",
+                 company="Pending",
+                 status="IN_PROGRESS",
+                 source="chatbot",
+                 tenant_id=chat_session.tenant_id
+             )
              db.add(lead)
-             # Note: No need for separate Conversation save here as we use ChatMessage table now
+             db.flush() # Get the ID
+             chat_session.lead_id = str(lead.id)
+             db.commit()
 
         # 3. Process State Machine
         next_state = current_state
