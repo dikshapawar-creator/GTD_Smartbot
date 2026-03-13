@@ -63,20 +63,20 @@ def create_session(
         now_utc = _now_utc()
         now_local = _to_local(now_utc, timezone_str)
         
-        # Use external visitor_uuid if provided, otherwise generate a new one
-        v_uuid = visitor_uuid if visitor_uuid else str(uuid.uuid4())
-        
+        # Normalize visitor_uuid
+        v_uuid = str(visitor_uuid) if visitor_uuid else str(uuid.uuid4())
+
         logger.info(f"Creating session with visitor_uuid: {v_uuid}")
 
         chat_session = ChatSession(
             session_id=session_id,
             session_uuid=s_uuid,
             tenant_id=tenant_id,
+            visitor_uuid=v_uuid,
             initial_ip=ip_address,
             last_seen_ip=ip_address,
             last_seen_at=now_utc,
             visitor_fingerprint=fingerprint,
-            visitor_uuid=v_uuid,
             user_agent=user_agent,
             browser=browser,
             os=os_name,
@@ -87,6 +87,7 @@ def create_session(
             started_at_utc=now_utc,
             started_at_local=now_local,
             last_activity_utc=now_utc,
+            total_messages=0,   # important
             session_status=SessionStatus.ACTIVE,
             conversation_mode=ConversationMode.BOT,
             status="ACTIVE",
@@ -107,9 +108,11 @@ def create_session(
         )
         try:
             db.rollback()
-            # Invalidate the underlying connection so SQLAlchemy discards it
-            # and picks a fresh one from the pool on the next operation.
-            db.bind.dispose()
+            # Invalidate the specific connection instead of disposing the whole pool
+            try:
+                db.connection().invalidate()
+            except Exception:
+                pass
         except Exception:
             pass
         time.sleep(0.5)  # Brief pause to allow pool to establish a fresh connection
@@ -132,7 +135,7 @@ def get_active_session(db: Session, session_id: str, tenant_id: Optional[int] = 
     Look up a session and check for inactivity-based expiry.
     """
     q = db.query(ChatSession).filter(
-        ChatSession.session_uuid == session_id, 
+        ChatSession.session_uuid == uuid.UUID(session_id), 
         ChatSession.session_status == SessionStatus.ACTIVE,
         ChatSession.is_deleted == False
     )
@@ -163,7 +166,7 @@ def close_session(db: Session, session_id: str, tenant_id: Optional[int] = None)
     """Mark as CLOSED and calculate duration metric."""
     q = (
         db.query(ChatSession)
-        .filter(ChatSession.session_uuid == session_id, ChatSession.is_deleted == False)
+        .filter(ChatSession.session_uuid == uuid.UUID(session_id), ChatSession.is_deleted == False)
     )
     if tenant_id is not None:
         q = q.filter(ChatSession.tenant_id == tenant_id)
@@ -219,7 +222,7 @@ def save_message(
 
     # Update session metrics and activity
     chat_session.last_activity_utc = now_utc
-    chat_session.total_messages += 1
+    chat_session.total_messages = (chat_session.total_messages or 0) + 1
     
     # Optimistic locking increment
     chat_session.version += 1
@@ -236,7 +239,7 @@ def trigger_agent_takeover(db: Session, session_id: str, lead_id: Optional[str] 
     chat_session = (
         db.query(ChatSession)
         .filter(
-            ChatSession.session_uuid == session_id, 
+            ChatSession.session_uuid == uuid.UUID(session_id), 
             ChatSession.session_status == SessionStatus.ACTIVE,
             ChatSession.is_deleted == False
         )
