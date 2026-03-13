@@ -18,7 +18,7 @@ from fastapi import (
 )
 from jose import jwt, JWTError
 from pydantic import BaseModel
-from sqlalchemy import func, update
+from sqlalchemy import func, update, or_, String, cast
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -468,13 +468,13 @@ def get_conversation_messages(
 @router.post("/intervene/{session_id}")
 def intervene_in_conversation(
     session_id: str,
-    background_tasks: BackgroundTasks,          # ← FIXED: was asyncio.create_task
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(1)),
 ):
     """
-    Atomic agent takeover. Prevents race conditions via conditional DB update.
-    Tenant isolation ensures agents can only intervene in their own tenant's sessions.
+    Atomic agent takeover.
+    Allows claiming BOT sessions, reactivating CLOSED sessions, or resuming own chats.
     """
     session_id = session_id.lower()
     query_id = session_id
@@ -482,59 +482,52 @@ def intervene_in_conversation(
     if is_valid_uuid(query_id):
         id_filter = (ChatSession.session_uuid == uuid.UUID(query_id)) | (ChatSession.session_id == query_id)
 
-    stmt = (
-        update(ChatSession)
-        .where(
-            id_filter,
-            ChatSession.tenant_id == current_user.tenant_id,  # ← TENANT GUARD
-            ChatSession.conversation_mode == ConversationMode.BOT,
-            ChatSession.is_deleted == False,
-        )
-        .values(
-            session_status=SessionStatus.ACTIVE, # Reactivate closed sessions
-            status="ACTIVE",
-            conversation_mode=ConversationMode.HUMAN,
-            assigned_agent_id=current_user.id,
-            assigned_at=datetime.now(dt_timezone.utc),
-            is_locked=True,
-            version=ChatSession.version + 1,
-        )
+    # 1. Fetch the session with a lock and tenant isolation
+    logger.info(f"INTERVENE: User {current_user.id} attempting to intervene in session {session_id}")
+    session = db.query(ChatSession).filter(
+        or_(
+            ChatSession.session_uuid == session_id,
+            ChatSession.session_id.cast(String) == session_id
+        ),
+        ChatSession.tenant_id == current_user.tenant_id
+    ).with_for_update().first()
+
+    if not session:
+        logger.warning(f"INTERVENE: Session {session_id} not found for tenant {current_user.tenant_id}")
+        raise HTTPException(status_code=404, detail="Conversation session not found")
+
+    logger.info(f"INTERVENE: Current session state: mode={session.conversation_mode}, status={session.session_status}, agent={session.assigned_agent_id}")
+
+    # BROADENED LOGIC: Allow if BOT, or CLOSED, or already assigned to ME, or if it's a history chat.
+    # We basically allow takeover unless it's ACTIVE + HUMAN + SOMEONE_ELSE.
+    can_intervene = (
+        session.conversation_mode == ConversationMode.BOT or
+        session.session_status == SessionStatus.CLOSED or
+        session.assigned_agent_id == current_user.id or
+        session.assigned_agent_id is None
     )
 
-    result = db.execute(stmt)
-    db.commit()
-
-    if result.rowcount == 0:
-        existing = (
-            db.query(ChatSession)
-            .filter(
-                id_filter,
-                ChatSession.tenant_id == current_user.tenant_id,
-            )
-            .first()
-        )
-        if not existing:
-            raise HTTPException(status_code=404, detail="Session not found")
-        
-        # ── IDOMPOTENT INTERVENTION ──
-        # If already in HUMAN mode and assigned to ME, return success.
-        if (existing.conversation_mode == ConversationMode.HUMAN and 
-            existing.assigned_agent_id == current_user.id):
-            return {"success": True, "message": "Already intervened", "mode": "HUMAN"}
-
-        if existing.conversation_mode == ConversationMode.HUMAN:
-            raise HTTPException(
-                status_code=409,
-                detail=f"Already claimed by agent {existing.assigned_agent_id}",
-            )
+    if not can_intervene:
+        logger.warning(f"INTERVENE: Conflict for user {current_user.id} on session {session_id}. Assigned to {session.assigned_agent_id}")
+        raise HTTPException(status_code=409, detail="This conversation is already being managed by another agent.")
         raise HTTPException(
-            status_code=400,
-            detail="Unable to intervene in this session (possibly closed or deleted)",
+            status_code=409,
+            detail=f"Already claimed by agent {session.assigned_agent_id}",
         )
+
+    # 3. Perform update
+    session.session_status = SessionStatus.ACTIVE
+    session.status = "ACTIVE"
+    session.conversation_mode = ConversationMode.HUMAN
+    session.assigned_agent_id = current_user.id
+    session.assigned_at = datetime.now(dt_timezone.utc)
+    session.is_locked = True
+    session.version += 1
+    db.commit()
 
     logger.info({"event": "agent_intervened", "session_id": session_id, "agent_id": current_user.id})
 
-    # ── Safe async broadcast via BackgroundTasks (works in sync routes) ──
+    # 4. Broadcast updates and create system messages
     async def _broadcast():
         await socket_manager.broadcast_event(
             "SESSION_UPDATED",
@@ -547,10 +540,9 @@ def intervene_in_conversation(
 
     background_tasks.add_task(_broadcast)
 
-    # 3. Create Enterprise Join Message (First time only)
     join_text = "A sales agent has joined the conversation."
     join_msg = ChatMessage(
-        session_id=session_id,
+        session_id=session.session_id,
         message_type="system",
         message_text=join_text,
         created_at_utc=datetime.now(dt_timezone.utc),
@@ -559,20 +551,20 @@ def intervene_in_conversation(
     db.add(join_msg)
     db.commit()
 
-    # 4. Notify CRM Dashboard & Visitor Widget
     background_tasks.add_task(
         socket_manager.broadcast_event,
         "NEW_SYSTEM_MESSAGE",
         {
-            "session_id": session_id,
+            "session_id": session.session_id,
             "message": join_text,
             "sender": "system",
         }
     )
+    
     from app.services.websocket_manager import manager
     background_tasks.add_task(
         manager.send_to_client,
-        session_id,
+        session.session_id,
         {
             "type": "system",
             "message": join_text,
@@ -732,7 +724,8 @@ async def dashboard_websocket(
     SECURITY: JWT validated from query param before connection is accepted.
     Hardcoded user_id has been REMOVED.
     """
-    # ── Validate JWT before accepting connection ─────────────────────
+    await websocket.accept()
+    # ── Validate JWT ─────────────────────
     if not token:
         await websocket.close(code=4001, reason="Missing authentication token")
         return
@@ -749,8 +742,19 @@ async def dashboard_websocket(
 
     # ── Verify user is still active + token version valid ───────────
     user = db.query(User).filter(User.id == user_id).first()
-    if not user or not user.is_active or user.token_version != token_version:
-        await websocket.close(code=4003, reason="Access denied")
+    if not user:
+        logger.warning(f"DashboardWS: User {user_id} not found")
+        await websocket.close(code=4003, reason="User not found")
+        return
+        
+    if not user.is_active:
+        logger.warning(f"DashboardWS: User {user_id} is inactive")
+        await websocket.close(code=4003, reason="Account deactivated")
+        return
+
+    if user.token_version != token_version:
+        logger.warning(f"DashboardWS: User {user_id} token version mismatch. Expected {user.token_version}, got {token_version}")
+        await websocket.close(code=4003, reason="Session expired")
         return
 
     await socket_manager.connect(websocket, user_id)

@@ -48,12 +48,9 @@ def create_session(
     fingerprint: Optional[str] = None,
     tenant_id: int = 1,
     visitor_uuid: Optional[str] = None,
+    lead_id: Optional[str] = None,
 ) -> ChatSession:
-    """Creates a new session with senior IP & metadata tracking.
-    
-    Includes one automatic retry on transient DB connection failures
-    (e.g. '08S01 Communication link failure' from idle connection drops).
-    """
+    """Creates a new session with senior IP & metadata tracking."""
     import time
     from sqlalchemy.exc import OperationalError
 
@@ -66,13 +63,14 @@ def create_session(
         # Normalize visitor_uuid
         v_uuid = str(visitor_uuid) if visitor_uuid else str(uuid.uuid4())
 
-        logger.info(f"Creating session with visitor_uuid: {v_uuid}")
+        logger.info(f"Creating session with visitor_uuid: {v_uuid}, lead_id: {lead_id}")
 
         chat_session = ChatSession(
             session_id=session_id,
             session_uuid=s_uuid,
             tenant_id=tenant_id,
-            visitor_uuid=v_uuid,   # Explicitly pass the generated UUID
+            visitor_uuid=v_uuid,
+            lead_id=lead_id, # Link to existing lead if provided
             initial_ip=ip_address,
             last_seen_ip=ip_address,
             last_seen_at=now_utc,
@@ -87,7 +85,7 @@ def create_session(
             started_at_utc=now_utc,
             started_at_local=now_local,
             last_activity_utc=now_utc,
-            total_messages=0,   # important
+            total_messages=0,
             session_status=SessionStatus.ACTIVE,
             conversation_mode=ConversationMode.BOT,
             status="ACTIVE",

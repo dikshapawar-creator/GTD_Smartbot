@@ -22,7 +22,7 @@ from app.services.websocket_manager import manager
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["WebSocket"])
+router = APIRouter(prefix="/live-chat", tags=["WebSocket"])
 
 
 def _get_db_session() -> DBSession:
@@ -76,6 +76,7 @@ async def websocket_chat(
     Bidirectional WebSocket for live chat.
     SECURITY: Enforces tenant isolation and role-gated access.
     """
+    await websocket.accept()
     db = _get_db_session()
     user_tenant_id = None
 

@@ -73,6 +73,7 @@ async def initialize_session(request: Request, response: Response, init_req: Opt
     # Check if returning visitor with an ACTIVE session
     existing_session = None
     is_returning = False
+    carry_over_lead_id = None
     
     if visitor_uuid_ext:
         # 1. Try to find a currently ACTIVE session for this visitor
@@ -92,13 +93,25 @@ async def initialize_session(request: Request, response: Response, init_req: Opt
             logger.info(f"Reusing active session {new_session.session_id} for visitor {visitor_uuid_ext}")
         else:
             # 2. If no active session, check for ANY prior history to flag as returning
-            prior_history = db.query(ChatSession).filter(
+            # AND carry over their Lead ID if they have one
+            prior_session = db.query(ChatSession).filter(
                 ChatSession.visitor_uuid == visitor_uuid_ext,
                 ChatSession.total_messages > 0,
                 ChatSession.is_deleted == False
-            ).first()
-            if prior_history:
+            ).order_by(ChatSession.started_at_utc.desc()).first()
+            
+            if prior_session:
                 is_returning = True
+                # Check for lead id in any of their past sessions
+                session_with_lead = db.query(ChatSession).filter(
+                    ChatSession.visitor_uuid == visitor_uuid_ext,
+                    ChatSession.lead_id.isnot(None),
+                    ChatSession.is_deleted == False
+                ).order_by(ChatSession.started_at_utc.desc()).first()
+                
+                if session_with_lead:
+                    carry_over_lead_id = session_with_lead.lead_id
+                    logger.info(f"Returning visitor {visitor_uuid_ext} has previous lead_id {carry_over_lead_id}")
 
     if not existing_session:
         new_session = session_service.create_session(
@@ -113,7 +126,8 @@ async def initialize_session(request: Request, response: Response, init_req: Opt
             device_type=meta["device_type"],
             fingerprint=fingerprint,
             tenant_id=settings.DEFAULT_TENANT_ID,
-            visitor_uuid=visitor_uuid_ext
+            visitor_uuid=visitor_uuid_ext,
+            lead_id=carry_over_lead_id # 🔥 Identity Retention
         )
     
     # 🚨 COMMIT BEFORE BROADCAST

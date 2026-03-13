@@ -21,13 +21,11 @@ class ConnectionManager:
 
     async def connect_client(self, session_id: str, ws: WebSocket):
         session_id = session_id.lower()
-        await ws.accept()
         self._clients[session_id] = ws
         logger.info({"event": "ws_client_connected", "session_id": session_id})
 
     async def connect_agent(self, session_id: str, ws: WebSocket):
         session_id = session_id.lower()
-        await ws.accept()
         self._agents[session_id] = ws
         logger.info({"event": "ws_agent_connected", "session_id": session_id})
 
