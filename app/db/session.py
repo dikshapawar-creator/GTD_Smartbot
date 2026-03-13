@@ -133,9 +133,7 @@ def init_db():
             conn.execute(text("SELECT 1"))
         logger.info("Database: Connectivity verified.")
 
-        # 2. Synchronize Schema
-        # Force metadata refresh to pick up any new columns from migrations
-        Base.metadata.reflect(bind=engine)
+        # 2. Synchronize Schema with metadata refresh
         Base.metadata.create_all(bind=engine)
         
         # 3. Hot-fix: Ensure tenant_id columns exist (SQL Server)

@@ -62,7 +62,9 @@ def create_session(
         now_utc = _now_utc()
         now_local = _to_local(now_utc, timezone_str)
         
-        v_uuid = visitor_uuid or str(uuid4())
+        v_uuid = visitor_uuid or str(uuid4()) # Fallback to local generation if frontend didn't send one
+        
+        logger.info(f"Creating session with visitor_uuid: {v_uuid}")
 
         chat_session = ChatSession(
             session_id=session_id,
