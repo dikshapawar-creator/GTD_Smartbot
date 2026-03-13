@@ -487,7 +487,6 @@ def intervene_in_conversation(
         .where(
             id_filter,
             ChatSession.tenant_id == current_user.tenant_id,  # ← TENANT GUARD
-            # Removed: ChatSession.session_status == SessionStatus.ACTIVE
             ChatSession.conversation_mode == ConversationMode.BOT,
             ChatSession.is_deleted == False,
         )
@@ -516,10 +515,17 @@ def intervene_in_conversation(
         )
         if not existing:
             raise HTTPException(status_code=404, detail="Session not found")
+        
+        # ── IDOMPOTENT INTERVENTION ──
+        # If already in HUMAN mode and assigned to ME, return success.
+        if (existing.conversation_mode == ConversationMode.HUMAN and 
+            existing.assigned_agent_id == current_user.id):
+            return {"success": True, "message": "Already intervened", "mode": "HUMAN"}
+
         if existing.conversation_mode == ConversationMode.HUMAN:
             raise HTTPException(
                 status_code=409,
-                detail=f"Already claimed by agent ID {existing.assigned_agent_id}",
+                detail=f"Already claimed by agent {existing.assigned_agent_id}",
             )
         raise HTTPException(
             status_code=400,
