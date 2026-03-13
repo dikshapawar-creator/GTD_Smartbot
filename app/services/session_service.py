@@ -3,6 +3,7 @@ SessionService — Enterprise DB-level session lifecycle management.
 Features: inactivity-based expiry, activity tracking, and engagement metrics.
 """
 import logging
+import uuid
 from datetime import datetime, timezone as dt_timezone, timedelta
 from uuid import uuid4
 from typing import Optional
@@ -62,7 +63,8 @@ def create_session(
         now_utc = _now_utc()
         now_local = _to_local(now_utc, timezone_str)
         
-        v_uuid = visitor_uuid or str(uuid4()) # Fallback to local generation if frontend didn't send one
+        # Use external visitor_uuid if provided, otherwise generate a new one
+        v_uuid = visitor_uuid if visitor_uuid else str(uuid.uuid4())
         
         logger.info(f"Creating session with visitor_uuid: {v_uuid}")
 
