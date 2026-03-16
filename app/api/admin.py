@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from app.api.deps import require_role
 from app.core.dependencies import get_db
@@ -76,7 +76,7 @@ def get_dashboard_stats(
              {
                  "id": "welcome_1",
                  "message": f"Welcome to the {tenant_name} portal. Setup your first chat session.",
-                 "time": datetime.utcnow().isoformat()
+                 "time": datetime.now(timezone.utc).isoformat()
              }
         ],
         "recent_leads": [

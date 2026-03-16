@@ -17,7 +17,7 @@ from fastapi import (
     Query, WebSocket, WebSocketDisconnect, status as http_status
 )
 from jose import jwt, JWTError
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, update, or_, String, cast
 from sqlalchemy.orm import Session
 
@@ -70,6 +70,7 @@ class LiveConversationItem(BaseModel):
     language: Optional[str] = "en"
     duration_seconds: Optional[int] = 0
     started_at_local: Optional[datetime] = None
+    server_time_utc: Optional[datetime] = None # Context for duration syncing
 
     class Config:
         from_attributes = True
@@ -86,7 +87,7 @@ class ChatMessageItem(BaseModel):
     session_id: str
     message_type: str  # user | bot | agent | system
     message_text: str
-    created_at_utc: datetime
+    created_at_utc: datetime = Field(..., description="UTC timestamp with timezone info")
 
     class Config:
         from_attributes = True
@@ -97,6 +98,7 @@ class PaginatedHistory(BaseModel):
     page: int
     page_size: int
     items: List[LiveConversationItem]
+    server_time_utc: datetime = Field(default_factory=lambda: datetime.now(dt_timezone.utc))
 
 
 class PaginatedMessages(BaseModel):
@@ -154,6 +156,102 @@ def _build_conversation_query(
         q = q.filter(ChatSession.last_activity_utc <= date_to)
 
     return q.order_by(ChatSession.started_at_utc.desc())
+
+
+def consolidate_visitor_sessions(db: Session, visitor_uuid: str) -> Optional[ChatSession]:
+    """
+    Enterprise session consolidation: If a visitor has multiple ACTIVE sessions,
+    consolidate them into the most recent one and close the others.
+    """
+    try:
+        active_sessions = db.query(ChatSession).filter(
+            ChatSession.visitor_uuid == visitor_uuid,
+            ChatSession.session_status == SessionStatus.ACTIVE,
+            ChatSession.is_deleted == False
+        ).order_by(ChatSession.started_at_utc.desc()).all()
+        
+        if len(active_sessions) <= 1:
+            return active_sessions[0] if active_sessions else None
+        
+        # Keep the most recent session, close the others
+        primary_session = active_sessions[0]
+        duplicate_sessions = active_sessions[1:]
+        
+        logger.warning(f"Found {len(duplicate_sessions)} duplicate sessions for visitor {visitor_uuid}, consolidating...")
+        
+        for dup_session in duplicate_sessions:
+            dup_session.session_status = SessionStatus.CLOSED
+            dup_session.ended_at_utc = session_service._now_utc()
+            logger.info(f"Closed duplicate session {dup_session.session_id}")
+        
+        db.commit()
+        return primary_session
+        
+    except Exception as e:
+        logger.error(f"Error consolidating sessions for visitor {visitor_uuid}: {e}")
+        return None
+
+
+def _extract_visitor_name_from_chat(session: ChatSession, db: Session) -> Optional[str]:
+    """
+    Extract visitor name from chat messages for better identification.
+    Looks for patterns like "My name is John" or "I'm Sarah" in user messages.
+    """
+    try:
+        # Get recent user messages from this session
+        messages = db.query(ChatMessage).filter(
+            ChatMessage.session_id == session.session_id,
+            ChatMessage.message_type == "user"
+        ).order_by(ChatMessage.created_at_utc.desc()).limit(10).all()
+        
+        import re
+        name_patterns = [
+            r"my name is ([A-Za-z]+)",
+            r"i'm ([A-Za-z]+)",
+            r"i am ([A-Za-z]+)",
+            r"call me ([A-Za-z]+)",
+            r"this is ([A-Za-z]+)"
+        ]
+        
+        for msg in messages:
+            text = msg.message_text.lower()
+            for pattern in name_patterns:
+                match = re.search(pattern, text)
+                if match:
+                    name = match.group(1).capitalize()
+                    if len(name) > 1 and name not in ['Bot', 'Agent', 'System']:
+                        return name
+        
+        return None
+    except Exception as e:
+        logger.error(f"Error extracting name from chat: {e}")
+        return None
+
+
+def _get_visitor_display_name(session: ChatSession, lead: Optional[Lead], db: Session = None) -> str:
+    """
+    Enterprise-grade visitor identification with progressive disclosure.
+    Priority: Lead Name > Extracted Name from Chat > Geographic Identity > Anonymous
+    """
+    # 1. If we have a captured lead, use their name
+    if lead and lead.name and lead.name != "Visitor":
+        return lead.name
+    
+    # 2. Try to extract name from chat messages
+    if db:
+        extracted_name = _extract_visitor_name_from_chat(session, db)
+        if extracted_name:
+            return extracted_name
+    
+    # 3. Use geographic + device identity for better recognition
+    if session.country and session.city:
+        device_info = f"{session.device_type}" if session.device_type else "Desktop"
+        return f"Visitor from {session.city}, {session.country} ({device_info})"
+    elif session.country:
+        return f"Visitor from {session.country}"
+    
+    # 4. Fallback to anonymous with session hint
+    return f"Anonymous Visitor #{str(session.session_uuid)[:8]}"
 
 
 def _assemble_items(sessions, db: Session) -> List[LiveConversationItem]:
@@ -221,8 +319,9 @@ def _assemble_items(sessions, db: Session) -> List[LiveConversationItem]:
                     "created_at": s.started_at_utc.replace(tzinfo=dt_timezone.utc) if s.started_at_utc else None,
                     "last_message_at": s.last_activity_utc.replace(tzinfo=dt_timezone.utc) if s.last_activity_utc else None,
                     "is_locked": s.is_locked,
-                    "lead_name": lead.name if lead else (f"{s.initial_ip} ({s.country})" if s.initial_ip and s.country else "Visitor"),
-                    "lead_company": lead.company if lead else None,
+                    "lead_name": _get_visitor_display_name(s, lead, db),
+                    "lead_email": lead.email if lead else None,
+                    "lead_phone": lead.phone if lead else None,
                     "initial_ip": s.initial_ip,
                     "country": s.country,
                     "city": s.city,
@@ -234,7 +333,8 @@ def _assemble_items(sessions, db: Session) -> List[LiveConversationItem]:
                     "spam_flag": s.spam_flag,
                     "language": s.language,
                     "duration_seconds": s.duration_seconds,
-                    "started_at_local": s.started_at_local.replace(tzinfo=dt_timezone.utc) if s.started_at_local else None, # Even local is stored naive, treat as UTC for transport
+                    "started_at_local": s.started_at_local.replace(tzinfo=dt_timezone.utc) if s.started_at_local else None,
+                    "server_time_utc": datetime.now(dt_timezone.utc)
                 }
             )
         )
@@ -298,8 +398,8 @@ def get_conversation_analytics(
     
     return {
         "active_visitors": active_sessions,
-        "avg_lead_score": round(float(avg_score or 0), 1),
-        "avg_duration": round(float(avg_duration or 0), 0),
+        "avg_lead_score": float(f"{avg_score or 0:.1f}"),
+        "avg_duration": int(avg_duration or 0),
         "spam_visitors": spam_sessions,
         "agent_chats": active_sessions # Placeholder for active agent handling
     }
@@ -330,12 +430,12 @@ def list_conversation_history(
     offset = (page - 1) * page_size
     sessions = q.offset(offset).limit(page_size).all()
 
-    return PaginatedHistory(
-        total=total,
-        page=page,
-        page_size=page_size,
-        items=_assemble_items(sessions, db),
-    )
+    return PaginatedHistory.model_validate({
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "items": _assemble_items(sessions, db),
+    })
 
 
 # ── Conversation Detail (with PII) ──────────────────────────────────────
@@ -399,6 +499,7 @@ def get_conversation_detail(
             "language": s.language,
             "duration_seconds": s.duration_seconds,
             "started_at_local": s.started_at_local.replace(tzinfo=dt_timezone.utc) if s.started_at_local else None,
+            "server_time_utc": datetime.now(dt_timezone.utc)
         }
     )
 
@@ -420,7 +521,7 @@ def get_conversation_messages(
     query_id = session_id
     id_filter = ChatSession.session_id == query_id
     if is_valid_uuid(query_id):
-        id_filter = (ChatSession.session_uuid == query_id) | (ChatSession.session_id == query_id)
+        id_filter = (ChatSession.session_uuid == uuid.UUID(query_id)) | (ChatSession.session_id == query_id)
 
     session_exists = (
         db.query(ChatSession.session_id)
@@ -448,13 +549,26 @@ def get_conversation_messages(
     total = q.count()
     offset = (page - 1) * page_size
     messages = q.offset(offset).limit(page_size).all()
+    
+    # ── Map to aware datetimes ────────────────────────────────────────
+    message_items = []
+    for m in messages:
+        message_items.append(
+            ChatMessageItem.model_validate({
+                "id": m.id,
+                "session_id": m.session_id,
+                "message_type": m.message_type,
+                "message_text": m.message_text,
+                "created_at_utc": m.created_at_utc.replace(tzinfo=dt_timezone.utc) if m.created_at_utc else datetime.now(dt_timezone.utc)
+            })
+        )
 
-    return PaginatedMessages(
-        total=total,
-        page=page,
-        page_size=page_size,
-        items=messages,
-    )
+    return PaginatedMessages(**{
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "items": message_items,
+    })
 
 
 # ── Atomic Intervention ─────────────────────────────────────────────────
@@ -504,10 +618,6 @@ def intervene_in_conversation(
     if not can_intervene:
         logger.warning(f"INTERVENE: Conflict for user {current_user.id} on session {session_id}. Assigned to {session.assigned_agent_id}")
         raise HTTPException(status_code=409, detail="This conversation is already being managed by another agent.")
-        raise HTTPException(
-            status_code=409,
-            detail=f"Already claimed by agent {session.assigned_agent_id}",
-        )
 
     # 3. Perform update
     session.session_status = SessionStatus.ACTIVE
@@ -754,14 +864,36 @@ async def dashboard_websocket(
     await socket_manager.connect(websocket, user_id)
     logger.info({"event": "dashboard_ws_connected", "user_id": user_id})
 
+    # ── Keep Connection Alive ───────────────────────────────────────
+    logger.info(f"📊 [WS] Dashboard sync connected for user {user_id}")
     try:
         while True:
-            await websocket.receive_text()  # Keep alive
+            # Dashboard is primarily for server -> agent notifications.
+            # We use receive_text to keep the socket alive and handle pings.
+            try:
+                raw_data = await websocket.receive_text()
+                
+                # Handle ping/pong for dashboard context too
+                import json
+                try:
+                    data = json.loads(raw_data)
+                    if data.get("type") == "ping":
+                        await websocket.send_json({
+                            "type": "pong",
+                            "server_time_utc": datetime.now(dt_timezone.utc).isoformat()
+                        })
+                except json.JSONDecodeError:
+                    pass # Ignore non-JSON on dashboard for now
+
+            except (RuntimeError, ValueError) as loop_err:
+                logger.error(f"⚠️ [WS] Non-fatal dashboard loop error for {user_id}: {loop_err}")
+                continue
+
     except WebSocketDisconnect:
-        socket_manager.disconnect(websocket, user_id)
-        logger.info({"event": "dashboard_ws_disconnected", "user_id": user_id})
+        logger.info(f"🔴 [WS] Dashboard sync disconnected for user {user_id}")
     except Exception as e:
-        logger.error(f"Dashboard WebSocket error for user {user_id}: {e}")
+        logger.error(f"❌ [WS] Global dashboard error for {user_id}: {e}", exc_info=True)
+    finally:
         socket_manager.disconnect(websocket, user_id)
 
 

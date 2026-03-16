@@ -1,6 +1,6 @@
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import List, Union, Any
+from typing import List, Union, Any, Optional
 import json
 
 

@@ -7,6 +7,7 @@ Enterprise hardened:
 - Clean resource cleanup
 """
 import logging
+import json
 from datetime import datetime, timezone
 from typing import Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
@@ -166,121 +167,143 @@ async def websocket_chat(
             return
 
         # ── Message Loop ─────────────────────────────────────────────────
+        logger.info(f"➡️ [WS] Entered persistent loop for session {session_id} ({role})")
         while True:
-            data = await websocket.receive_json()
-            msg_type = data.get("type", "message")
+            try:
+                # Use receive_text and parse manually for better error visibility
+                raw_data = await websocket.receive_text()
+                
+                try:
+                    data = json.loads(raw_data)
+                except json.JSONDecodeError:
+                    logger.warning(f"📩 [WS] Received non-JSON data from {role}: {raw_data[:100]}")
+                    continue
 
-            # ── Handle Typing Indicator ──────────────────────────────────
-            if msg_type == "typing":
-                is_typing = data.get("is_typing", False)
+                msg_type = data.get("type", "message")
+                logger.debug(f"📩 [WS] Received {msg_type} from {role}")
+
+                # ── Handle Typing Indicator ──────────────────────────────
+                if msg_type == "typing":
+                    is_typing = data.get("is_typing", False)
+                    if role == "client":
+                        await manager.send_to_agent(session_id, {
+                            "type": "TYPING_EVENT",
+                            "is_typing": is_typing,
+                            "sender": "user",
+                            "session_id": session_id,
+                        })
+                    else:
+                        await manager.send_to_client(session_id, {
+                            "type": "TYPING_EVENT",
+                            "is_typing": is_typing,
+                            "sender": "agent",
+                            "session_id": session_id,
+                        })
+                    continue
+
+                # ── Handle Ping/Pong ─────────────────────────────────────
+                if msg_type == "ping":
+                    await websocket.send_json({
+                        "type": "pong",
+                        "server_time_utc": datetime.now(timezone.utc).isoformat()
+                    })
+                    continue
+
+                text = data.get("message", "").strip()
+                if not text:
+                    continue
+
                 if role == "client":
-                    await manager.send_to_agent(session_id, {
-                        "type": "TYPING_EVENT",
-                        "is_typing": is_typing,
-                        "sender": "user",
-                        "session_id": session_id,
-                    })
-                else:
-                    await manager.send_to_client(session_id, {
-                        "type": "TYPING_EVENT",
-                        "is_typing": is_typing,
-                        "sender": "agent",
-                        "session_id": session_id,
-                    })
+                    _save_ws_message(db, session_id, text, "user", user_tenant_id)
+                    
+                    # 🔥 Broadcast to CRM Dashboard
+                    from app.core.socket_manager import socket_manager
+                    await socket_manager.broadcast_event(
+                        "NEW_MESSAGE",
+                        {
+                            "session_id": session_id,
+                            "message": text,
+                            "sender": "user",
+                            "timestamp": datetime.now(timezone.utc).isoformat()
+                        }
+                    )
+
+                    # ✅ ALWAYS re-fetch session mode from DB to avoid stale cache
+                    db.expire_all()
+                    import uuid
+                    fresh_session = db.query(ChatSession).filter(
+                        ChatSession.session_uuid == uuid.UUID(session_id)
+                    ).first()
+
+                    if fresh_session and fresh_session.conversation_mode == ConversationMode.HUMAN:
+                        logger.info(f"Relaying client message to agent for session {session_id}")
+                        await manager.send_to_agent(session_id, {
+                            "type": "message",
+                            "message": text,
+                            "sender": "user",
+                        })
+                    else:
+                        # Bot is handling
+                        try:
+                            from app.services.chatbot import ChatbotService
+                            bot_response = ChatbotService.handle_message(
+                                db=db,
+                                chat_session=fresh_session,
+                                user_message=text
+                            )
+                            reply_text = bot_response.get("message", "")
+                            if reply_text:
+                                await websocket.send_json({
+                                    "type": "message",
+                                    "message": reply_text,
+                                    "sender": "bot",
+                                    "state": bot_response.get("state"),
+                                    "type_hint": bot_response.get("type"),
+                                    "cta_label": bot_response.get("cta_label"),
+                                    "action": bot_response.get("action"),
+                                })
+                        except Exception as bot_err:
+                            logger.error(f"Bot response error for session {session_id}: {bot_err}")
+
+                elif role == "agent":
+                    _save_ws_message(db, session_id, text, "agent", user_tenant_id)
+                    
+                    # 🔥 Broadcast to CRM Dashboard
+                    from app.core.socket_manager import socket_manager
+                    await socket_manager.broadcast_event(
+                        "NEW_MESSAGE",
+                        {
+                            "session_id": session_id,
+                            "message": text,
+                            "sender": "agent",
+                            "timestamp": datetime.now(timezone.utc).isoformat()
+                        }
+                    )
+
+                    # 🔧 ENHANCED LOGGING: Debug message routing
+                    logger.info(f"[WS_AGENT] Attempting to send message to client for session: {session_id}")
+                    logger.info(f"[WS_AGENT] Available clients: {list(manager._clients.keys())}")
+                    
+                    normalized_sid = session_id.lower()
+                    if manager.has_client(normalized_sid):
+                        logger.info(f"[WS_AGENT] Client found for session {normalized_sid}, sending message")
+                        await manager.send_to_client(normalized_sid, {
+                            "type": "message",
+                            "message": text,
+                            "sender": "agent",
+                        })
+                    else:
+                        logger.warning(f"[WS_AGENT] No client connected for session {normalized_sid}. Available clients: {list(manager._clients.keys())}")
+
+            except (RuntimeError, ValueError) as e:
+                # Catch potential socket protocol errors without breaking the loop
+                logger.error(f"⚠️ [WS] Non-fatal loop error for {session_id}: {e}")
                 continue
-
-            text = data.get("message", "").strip()
-            if not text:
-                logger.debug(f"Ignoring empty message in session {session_id}")
-                continue
-
-            # Standardize session ID for lookups
-            normalized_sid = session_id.lower()
-
-            if role == "client":
-                _save_ws_message(db, session_id, text, "user", user_tenant_id)
-                
-                # 🔥 Broadcast to CRM Dashboard
-                from app.core.socket_manager import socket_manager
-                await socket_manager.broadcast_event(
-                    "NEW_MESSAGE",
-                    {
-                        "session_id": session_id,
-                        "message": text,
-                        "sender": "user",
-                        "timestamp": datetime.now(timezone.utc).isoformat()
-                    }
-                )
-
-                # ✅ ALWAYS re-fetch session mode from DB to avoid stale cache
-                db.expire_all()  # Force SQLAlchemy to reload from DB
-                import uuid
-                fresh_session = db.query(ChatSession).filter(
-                    ChatSession.session_uuid == uuid.UUID(session_id)
-                ).first()
-
-                if fresh_session and fresh_session.conversation_mode == ConversationMode.HUMAN:
-                    # Agent is handling — forward to agent WS
-                    logger.info(f"Relaying client message to agent for session {session_id}")
-                    await manager.send_to_agent(session_id, {
-                        "type": "message",
-                        "message": text,
-                        "sender": "user",
-                    })
-                else:
-                    # Bot is handling — call chatbot service directly
-                    try:
-                        from app.services.chatbot import ChatbotService
-                        bot_response = ChatbotService.handle_message(
-                            db=db,
-                            chat_session=fresh_session,
-                            user_message=text
-                        )
-                        reply_text = bot_response.get("message", "")
-                        if reply_text:
-                            await websocket.send_json({
-                                "type": "message",
-                                "message": reply_text,
-                                "sender": "bot",
-                                "state": bot_response.get("state"),
-                                "type_hint": bot_response.get("type"),
-                                "cta_label": bot_response.get("cta_label"),
-                                "action": bot_response.get("action"),
-                            })
-                    except Exception as bot_err:
-                        logger.error(f"Bot response error for session {session_id}: {bot_err}")
-
-            elif role == "agent":
-                _save_ws_message(db, session_id, text, "agent", user_tenant_id)
-                
-                # 🔥 Broadcast to CRM Dashboard
-                from app.core.socket_manager import socket_manager
-                await socket_manager.broadcast_event(
-                    "NEW_MESSAGE",
-                    {
-                        "session_id": session_id,
-                        "message": text,
-                        "sender": "agent",
-                        "timestamp": datetime.now(timezone.utc).isoformat()
-                    }
-                )
-
-                normalized_sid = session_id.lower()
-                if manager.has_client(normalized_sid):
-                    logger.info(f"Relaying agent message to client for session {normalized_sid}")
-                    await manager.send_to_client(normalized_sid, {
-                        "type": "message",
-                        "message": text,
-                        "sender": "agent",
-                    })
-                else:
-                    logger.warning(f"Failed to relay agent message: Client not connected for session {normalized_sid}")
-                    logger.info(f"Active clients in manager: {list(manager._clients.keys())}")
 
     except WebSocketDisconnect:
-        logger.info({"event": "ws_disconnect", "session_id": session_id, "role": role})
+        logger.info(f"🔴 [WS] Client disconnected: {session_id} ({role})")
     except Exception as e:
-        logger.error({"event": "ws_error", "session_id": session_id, "error": str(e)})
+        logger.error(f"❌ [WS] Global error for {session_id}: {e}", exc_info=True)
     finally:
         if role == "client":
             manager.disconnect_client(session_id)

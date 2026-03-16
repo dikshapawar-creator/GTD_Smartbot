@@ -1,7 +1,7 @@
 from pydantic import BaseModel, EmailStr, ConfigDict, Field, field_validator, model_validator
 from typing import Optional, List
 from uuid import UUID
-from datetime import datetime
+from datetime import datetime, timezone as dt_timezone
 from enum import Enum
 import re
 import logging
@@ -58,6 +58,7 @@ class SessionInitResponse(BaseModel):
     cta_label: Optional[str] = None
     action: Optional[str] = None
     conversation_status: Optional[str] = "BOT"
+    server_time_utc: datetime = Field(default_factory=lambda: datetime.now(dt_timezone.utc))
 
 
 class ChatMessageRequest(BaseModel):
@@ -76,6 +77,7 @@ class ChatMessageResponse(BaseModel):
     role: Optional[str] = None # For frontend history mapping
     has_greeted: Optional[bool] = None
     conversation_status: Optional[str] = "BOT"
+    server_time_utc: datetime = Field(default_factory=lambda: datetime.now(dt_timezone.utc))
 
 
 class LeadResponse(BaseModel):

@@ -2,7 +2,7 @@
 Spam detection logic to block malicious bots and persistent spammers.
 """
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 from collections import Counter
 from sqlalchemy.orm import Session
@@ -24,7 +24,7 @@ def check_message_spam(db: Session, session: ChatSession, new_message: str) -> b
     recent_messages = db.query(ChatMessage).filter(
         ChatMessage.session_id == session.session_id,
         ChatMessage.message_type == "user",
-        ChatMessage.created_at_utc >= datetime.utcnow() - timedelta(seconds=10)
+        ChatMessage.created_at_utc >= datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=10)
     ).count()
     
     if recent_messages >= 5:
@@ -77,7 +77,7 @@ def check_message_spam(db: Session, session: ChatSession, new_message: str) -> b
     if session.initial_ip:
         recent_sessions = db.query(ChatSession).filter(
             ChatSession.initial_ip == session.initial_ip,
-            ChatSession.started_at_utc >= datetime.utcnow() - timedelta(minutes=1)
+            ChatSession.started_at_utc >= datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=1)
         ).count()
         if recent_sessions > 5:
             return True

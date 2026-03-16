@@ -45,6 +45,7 @@ async def initialize_session(request: Request, response: Response, init_req: Opt
                 "cta_label": "Book Demo",
                 "action": "OPEN_LEAD_FORM",
                 "conversation_status": active_session.conversation_mode,
+                "server_time_utc": datetime.now(timezone.utc)
             }
 
     # Extract client info for new session
@@ -80,22 +81,22 @@ async def initialize_session(request: Request, response: Response, init_req: Opt
     carry_over_lead_id = None
     
     if visitor_uuid_ext:
-        # 1. Try to find a currently ACTIVE session for this visitor
-        existing_session = db.query(ChatSession).filter(
-            ChatSession.visitor_uuid == visitor_uuid_ext,
-            ChatSession.session_status == SessionStatus.ACTIVE,
-            ChatSession.is_deleted == False
-        ).order_by(ChatSession.started_at_utc.desc()).first()
-
+        logger.info(f"[SESSION_INIT] Looking for existing session for visitor_uuid: {visitor_uuid_ext}")
+        
+        # 🔥 ENTERPRISE: Consolidate any duplicate sessions first
+        from app.api.live_chat import consolidate_visitor_sessions
+        existing_session = consolidate_visitor_sessions(db, visitor_uuid_ext)
+        
         if existing_session:
+            logger.info(f"[SESSION_INIT] REUSING existing session {existing_session.session_id} (UUID: {existing_session.session_uuid}) for visitor {visitor_uuid_ext}")
             # Update activity timestamp
             existing_session.last_activity_utc = session_service._now_utc()
             existing_session.last_seen_at = session_service._now_utc()
             db.commit()
             new_session = existing_session
             is_returning = True
-            logger.info(f"Reusing active session {new_session.session_id} for visitor {visitor_uuid_ext}")
         else:
+            logger.info(f"[SESSION_INIT] No active session found for visitor {visitor_uuid_ext}, checking for prior history")
             # 2. If no active session, check for ANY prior history to flag as returning
             # AND carry over their Lead ID if they have one
             prior_session = db.query(ChatSession).filter(
@@ -106,6 +107,7 @@ async def initialize_session(request: Request, response: Response, init_req: Opt
             
             if prior_session:
                 is_returning = True
+                logger.info(f"[SESSION_INIT] Found prior session history for visitor {visitor_uuid_ext}")
                 # Check for lead id in any of their past sessions
                 session_with_lead = db.query(ChatSession).filter(
                     ChatSession.visitor_uuid == visitor_uuid_ext,
@@ -115,9 +117,12 @@ async def initialize_session(request: Request, response: Response, init_req: Opt
                 
                 if session_with_lead:
                     carry_over_lead_id = session_with_lead.lead_id
-                    logger.info(f"Returning visitor {visitor_uuid_ext} has previous lead_id {carry_over_lead_id}")
+                    logger.info(f"[SESSION_INIT] Returning visitor {visitor_uuid_ext} has previous lead_id {carry_over_lead_id}")
+    else:
+        logger.warning("[SESSION_INIT] No visitor_uuid provided in session initialization request")
 
     if not existing_session:
+        logger.info(f"[SESSION_INIT] Creating NEW session for visitor {visitor_uuid_ext}")
         new_session = session_service.create_session(
             db, 
             ip_address=client_ip,
@@ -133,6 +138,7 @@ async def initialize_session(request: Request, response: Response, init_req: Opt
             visitor_uuid=visitor_uuid_ext,
             lead_id=carry_over_lead_id # 🔥 Identity Retention
         )
+        logger.info(f"[SESSION_INIT] NEW session created: {new_session.session_id} (UUID: {new_session.session_uuid})")
     
     # 🚨 COMMIT BEFORE BROADCAST
     db.commit()
@@ -170,6 +176,7 @@ async def initialize_session(request: Request, response: Response, init_req: Opt
         "cta_label": "Book Demo",
         "action": "OPEN_LEAD_FORM",
         "conversation_status": new_session.conversation_mode,
+        "server_time_utc": datetime.now(timezone.utc)
     }
 
 
@@ -198,9 +205,15 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
     if not session_id:
         raise HTTPException(status_code=401, detail="Session required.")
 
-    active_session = session_service.get_active_session(db, session_id)
-    if not active_session:
-        raise HTTPException(status_code=401, detail="Invalid session.")
+    # 🔧 FIX: The session_id we get is actually a session_uuid, so we need to handle it properly
+    try:
+        active_session = session_service.get_active_session(db, session_id)
+        if not active_session:
+            raise HTTPException(status_code=401, detail="Invalid or expired session.")
+    except ValueError as e:
+        # Handle invalid UUID format
+        logger.error(f"Invalid session UUID format: {session_id}, error: {e}")
+        raise HTTPException(status_code=401, detail="Invalid session format.")
 
     # A. Check for Agent activity or Handoff state (Silence Rule)
     is_agent_active = (
@@ -213,7 +226,7 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
     if not is_agent_active:
         # Fallback check for last message from agent
         recent_agent_msg = db.query(ChatMessage).filter(
-            ChatMessage.session_id == session_id,
+            ChatMessage.session_id == active_session.session_id,
             ChatMessage.message_type == "agent"
         ).order_by(ChatMessage.created_at_utc.desc()).first()
         if recent_agent_msg:
@@ -232,7 +245,7 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
         await socket_manager.broadcast_event(
             "NEW_MESSAGE",
             {
-                "session_id": session_id,
+                "session_id": str(active_session.session_uuid),
                 "message": msg_req.message,
                 "sender": "user",
                 "timestamp": datetime.utcnow().isoformat()
@@ -244,7 +257,8 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
             "message": "", 
             "type": ResponseType.MESSAGE,
             "state": active_session.chat_state,
-            "conversation_status": active_session.conversation_mode
+            "conversation_status": active_session.conversation_mode,
+            "server_time_utc": datetime.now(timezone.utc)
         }
 
     # ── 2. INTENT & LEAD LOGIC ──────────────────────────────────────────
@@ -260,7 +274,8 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
             "sessionId": str(active_session.session_uuid),
             "message": "Security policy violation detected. Session closed.",
             "state": active_session.chat_state,
-            "conversation_status": active_session.conversation_mode
+            "conversation_status": active_session.conversation_mode,
+            "server_time_utc": datetime.now(timezone.utc)
         }
 
     # Analytics: Language Translation
@@ -301,7 +316,7 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
         await socket_manager.broadcast_event(
             "NEW_MESSAGE",
             {
-                "session_id": session_id,
+                "session_id": str(active_session.session_uuid),
                 "message": user_message,
                 "sender": "user",
                 "timestamp": datetime.utcnow().isoformat()
@@ -310,7 +325,7 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
         await socket_manager.broadcast_event(
             "NEW_MESSAGE",
             {
-                "session_id": session_id,
+                "session_id": str(active_session.session_uuid),
                 "message": bot_msg,
                 "sender": "bot",
                 "timestamp": datetime.utcnow().isoformat()
@@ -321,7 +336,8 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
             "sessionId": str(active_session.session_uuid),
             "message": bot_msg,
             "state": active_session.chat_state,
-            "conversation_status": active_session.conversation_mode
+            "conversation_status": active_session.conversation_mode,
+            "server_time_utc": datetime.now(timezone.utc)
         }
 
     # 2a. Handle Greetings
@@ -442,7 +458,8 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
         "sessionId": str(active_session.session_uuid),
         "message": bot_msg,
         "state": active_session.chat_state,
-        "conversation_status": active_session.conversation_mode
+        "conversation_status": active_session.conversation_mode,
+        "server_time_utc": datetime.utcnow()
     }
 
 # ── 3. Chat History (Persistence) ─────────────────────────────────────
