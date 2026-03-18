@@ -340,36 +340,48 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
             "server_time_utc": datetime.now(timezone.utc)
         }
 
-    # 2a. Handle Greetings
-    if intent == IntentType.GREETING and current_state == ChatState.START:
+    # 2a. Handle Greetings (Dynamic)
+    if intent == IntentType.GREETING:
+        config = db.query(IntentConfig).filter(IntentConfig.intent_key == "GREETING").first()
         if not active_session.has_greeted:
-            bot_msg = (
-                "Hello 👋 Welcome to GTD Service.\n\n"
-                "I help businesses find verified Import Export data, global buyers, and suppliers.\n\n"
-                "How may I assist you today?"
-            )
+            bot_msg = config.response_text if config else "Hello! How can I assist you today?"
             active_session.has_greeted = True
-            db.commit()
         else:
             bot_msg = "Hello! How can I assist you further with your trade intelligence today?"
-
+        
+        db.commit()
         session_service.save_message(db, active_session, bot_msg, "bot")
-        db.commit() # COMMIT BEFORE BROADCAST
-    
-    # 2b. Start Lead Flow (Intent: IMPORT/EXPORT or DEMO)
-    elif (intent in [IntentType.IMPORT_EXPORT, IntentType.DEMO]) and (current_state == ChatState.START):
-        bot_msg = (
-            "I will help you find the import export data.\n\n"
-            "To assist you better, please share your details.\n\n"
-            "May I know your Full Name?"
-        )
+        db.commit()
+
+    # 2b. Start Lead Flow (Intent: REQUEST_DEMO or LEAD_COLLECTION)
+    elif (intent in [IntentType.REQUEST_DEMO, IntentType.LEAD_COLLECTION, IntentType.DEMO]) and (current_state == ChatState.START):
+        config = db.query(IntentConfig).filter(IntentConfig.intent_key == intent.value).first()
+        bot_msg = config.response_text if config else "I can help you with that. To assist you better, please share your details.\n\nMay I know your Full Name?"
+        
+        # We append the name question if it's the start of lead capture
+        if "Full Name" not in bot_msg:
+            bot_msg += "\n\nMay I know your Full Name?"
+            
         active_session.chat_state = ChatState.NAME
         db.commit()
         session_service.save_message(db, active_session, bot_msg, "bot")
-        db.commit() # COMMIT BEFORE BROADCAST
+        db.commit()
 
-    # 2c. Lead Capture State Machine
-    else:
+    # 2c. Handle Specialized Trade Intents (Dynamic)
+    elif intent in [
+        IntentType.BUYER_SEARCH, IntentType.SUPPLIER_SEARCH, IntentType.HS_CODE_SEARCH,
+        IntentType.COMPETITOR_ANALYSIS, IntentType.SHIPMENT_RECORDS, 
+        IntentType.COUNTRY_TRADE_ANALYSIS, IntentType.PRODUCT_MARKET_RESEARCH,
+        IntentType.PRICING_INQUIRY, IntentType.IMPORT_EXPORT
+    ]:
+        config = db.query(IntentConfig).filter(IntentConfig.intent_key == intent.value).first()
+        bot_msg = config.response_text if config else "I can certainly help you with that. What specific product or HS code are you interested in?"
+        
+        session_service.save_message(db, active_session, bot_msg, "bot")
+        db.commit()
+
+    # 2d. Lead Capture State Machine (Continued)
+    elif current_state in [ChatState.NAME, ChatState.COMPANY, ChatState.EMAIL, ChatState.PHONE]:
         lead = None
         if active_session.lead_id:
             lead = db.query(Lead).filter(Lead.id == active_session.lead_id).first()
@@ -380,7 +392,7 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
                  placeholder_email = f"pending_{active_session.session_id}@gtdservice.local"
                  lead = Lead(
                      name=value if field == "name" else "Visitor",
-                     email=placeholder_email, # email is required in model
+                     email=placeholder_email, 
                      phone="Pending",
                      company="Pending",
                      status="IN_PROGRESS",
@@ -416,13 +428,16 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
                 "Thank you for sharing the details.\n\n"
                 "Please wait while I connect you with our trade expert."
             )
-        else:
-            # Fallback if unknown state or unknown intent while in flow
-            bot_msg = "I am not sure I understand. How else can I assist you with your trade needs?"
-
+        
         db.commit()
         session_service.save_message(db, active_session, bot_msg, "bot")
-        db.commit() # FINAL COMMIT BEFORE BROADCAST
+        db.commit()
+
+    else:
+        # Fallback for UNKNOWN intent or other states
+        bot_msg = "I'm not sure I understand. How else can I assist you with your trade needs? You can ask about buyers, suppliers, HS codes, or request a demo."
+        session_service.save_message(db, active_session, bot_msg, "bot")
+        db.commit()
 
     #  Broadcast both user and bot messages to CRM
     from app.core.socket_manager import socket_manager
