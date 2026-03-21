@@ -86,32 +86,41 @@ def create_or_update_lead(
     lead_req: LeadSubmitRequest,
     tenant_id: int = settings.DEFAULT_TENANT_ID,
     source: str = "chatbot",
-    session_id: Optional[str] = None
+    session_id: Optional[str] = None,
+    metadata: Optional[dict] = None
 ) -> Tuple[Lead, bool]:
     """
     Enterprise Lead Merge Logic:
-    - Checks for duplicates by Business Email OR contact number.
+    - Checks for duplicates by Business Email OR contact number (only non-deleted leads).
     - If a session_id is provided, tries to update the existing IN_PROGRESS lead.
     - Promotes status to NEW.
+    - Respects soft-delete: deleted leads stay deleted, creates new lead instead.
     """
     normalized_email = lead_req.business_email.strip().lower()
     normalized_phone = lead_req.contact_number.strip()
 
-    # 1. Primary check: Existing lead by email or phone. 
-    # NOTE: We remove 'is_deleted == False' to prevent 409 Conflict when re-submitting a deleted lead.
+    # 1. Primary check: Existing ACTIVE lead by email or phone (respect soft delete)
     lead = db.query(Lead).filter(
         (Lead.email == normalized_email) | (Lead.phone == normalized_phone),
-        Lead.tenant_id == tenant_id
+        Lead.tenant_id == tenant_id,
+        Lead.is_deleted == False  # Only find active leads, respect deletions
     ).first()
 
     # 2. Secondary check: Existing session-based lead (IN_PROGRESS)
+    # Look for lead linked to this session, not by session_id as lead ID
     session_lead = None
     if session_id:
-        session_lead = db.query(Lead).filter(Lead.id == session_id).first()
+        from app.models.chat_session import ChatSession
+        session = db.query(ChatSession).filter(ChatSession.session_id == session_id).first()
+        if session and session.lead_id:
+            session_lead = db.query(Lead).filter(
+                Lead.id == session.lead_id,
+                Lead.is_deleted == False
+            ).first()
 
     is_duplicate = False
     
-    # CASE 1: Duplicate found globally
+    # CASE 1: Duplicate found globally (active lead)
     if lead:
         is_duplicate = True
         lead.name = lead_req.full_name
@@ -120,23 +129,25 @@ def create_or_update_lead(
         lead.email = normalized_email
         lead.phone = normalized_phone
         lead.status = LeadStatus.NEW # Promote to NEW
-        lead.is_deleted = False      # 🔥 Restore if it was deleted
+        # DO NOT restore deleted leads - they stay deleted
         lead.updated_at = datetime.now(timezone.utc)
         
         # Log promotion
         AuditService.log_action(
             db, 
-            action=f"Lead promoted: {lead.email}", 
+            action=f"Lead updated: {lead.email}", 
             tenant_id=tenant_id
         )
 
-        # If we had a session lead, we might want to merge trade data
+        # 1.1 Update visitor identification if provided (DEPRECATED for Lead)
+        if metadata:
+            pass
+
         if session_lead and session_lead.id != lead.id:
             lead.trade_type = session_lead.trade_type or lead.trade_type
             lead.country_interested = session_lead.country_interested or lead.country_interested
             lead.product = session_lead.product or lead.product
-            # Mark session lead as deleted or merged? 
-            # For now, just keep the global one.
+            # visitor_uuid should already be identical or merged by now
     
     # CASE 2: No global duplicate, but we have a session lead to complete
     elif session_lead:
@@ -149,6 +160,9 @@ def create_or_update_lead(
         lead.status = LeadStatus.NEW # Promote to NEW
         lead.updated_at = datetime.now(timezone.utc)
 
+        if metadata:
+            pass
+
         # Log completion
         AuditService.log_action(
             db, 
@@ -156,7 +170,7 @@ def create_or_update_lead(
             tenant_id=tenant_id
         )
     
-    # CASE 3: Brand new lead
+    # CASE 3: Brand new lead (or deleted lead exists but we create new one)
     else:
         lead = Lead(
             name       = lead_req.full_name,
@@ -167,7 +181,7 @@ def create_or_update_lead(
             status     = LeadStatus.NEW,
             source     = source,
             tenant_id  = tenant_id,
-            created_at = datetime.now(timezone.utc),
+            created_at = datetime.now(timezone.utc)
         )
         db.add(lead)
         db.flush() # Get ID

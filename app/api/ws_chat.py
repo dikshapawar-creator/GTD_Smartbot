@@ -40,11 +40,10 @@ def _save_ws_message(
     now_utc = datetime.now(timezone.utc)
     
     # Update session activity — scope by tenant_id for isolation safety
-    import uuid
     chat_session = (
         db.query(ChatSession)
         .filter(
-            ChatSession.session_uuid == uuid.UUID(session_id),
+            (ChatSession.visitor_uuid == session_id) | (ChatSession.session_id == session_id),
             ChatSession.tenant_id == tenant_id,
             ChatSession.is_deleted == False
         )
@@ -92,11 +91,11 @@ async def websocket_chat(
                 return
             
             # Fetch session to get tenant_id for later message persists
-            import uuid
+            # Fetch session to get tenant_id for later message persists
             chat_session = (
                 db.query(ChatSession)
                 .filter(
-                    ChatSession.session_uuid == uuid.UUID(session_id), 
+                    (ChatSession.visitor_uuid == session_id) | (ChatSession.session_id == session_id), 
                     ChatSession.session_status == SessionStatus.ACTIVE, 
                     ChatSession.is_deleted == False
                 )
@@ -132,11 +131,11 @@ async def websocket_chat(
             user_tenant_id = agent.tenant_id
 
             # Verify session belongs to agent's tenant (allow CLOSED sessions to be reactivated)
-            import uuid
+            # Fetch session to get tenant_id for later message persists
             chat_session = (
                 db.query(ChatSession)
                 .filter(
-                    ChatSession.session_uuid == uuid.UUID(session_id),
+                    (ChatSession.visitor_uuid == session_id) | (ChatSession.session_id == session_id),
                     ChatSession.tenant_id == user_tenant_id, # ← TENANT ISOLATION
                     ChatSession.is_deleted == False
                 )
@@ -230,9 +229,9 @@ async def websocket_chat(
 
                     # ✅ ALWAYS re-fetch session mode from DB to avoid stale cache
                     db.expire_all()
-                    import uuid
+                    # Fetch session to get tenant_id for later message persists
                     fresh_session = db.query(ChatSession).filter(
-                        ChatSession.session_uuid == uuid.UUID(session_id)
+                        (ChatSession.visitor_uuid == session_id) | (ChatSession.session_id == session_id)
                     ).first()
 
                     if fresh_session and fresh_session.conversation_mode == ConversationMode.HUMAN:

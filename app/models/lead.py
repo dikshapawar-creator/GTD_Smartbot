@@ -76,6 +76,7 @@ class Lead(Base):
     product            = Column(String(255), nullable=True)
     requirement_type   = Column(String(255), nullable=True)
 
+
     # ── Concurrency & Audit ───────────────────────────────────────────────
     version    = Column(Integer, default=1, nullable=False)
     is_deleted = Column(Boolean, default=False, nullable=False)

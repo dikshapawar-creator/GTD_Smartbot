@@ -13,20 +13,16 @@ class ChatMessage(Base):
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
 
-    # FK references chat_sessions.session_id (UUID string)
-    session_id = Column(
-        String(36),
-        ForeignKey("chat_sessions.session_id", ondelete="CASCADE"),
-        nullable=False,
-        index=True
-    )
+    # FK references chat_sessions.session_id (String UUID)
+    session_id = Column(String(36), nullable=False, index=True)
 
-    # 'user' or 'bot'
+    # 'user', 'bot', 'agent', or 'system'
     message_type = Column(String(10), nullable=False)
 
     message_text = Column(Text, nullable=False)
 
     # Dual timestamps
+    created_at = Column(DateTime, nullable=False, index=True)
     created_at_utc = Column(DateTime, nullable=False, index=True)
     created_at_local = Column(DateTime, nullable=False)
 

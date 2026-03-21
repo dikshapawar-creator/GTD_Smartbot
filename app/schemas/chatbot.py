@@ -49,6 +49,8 @@ class ResponseType(str, Enum):
 
 class SessionInitRequest(BaseModel):
     visitor_uuid: Optional[str] = None
+    fingerprint: Optional[str] = None
+    metadata: Optional[dict] = Field(default_factory=dict)
 
 class SessionInitResponse(BaseModel):
     session_token: str
@@ -96,6 +98,7 @@ class LeadResponse(BaseModel):
     version: int = 1
     created_at: datetime
     updated_at: Optional[datetime] = None
+    
     model_config = ConfigDict(from_attributes=True)
 
 class StatusUpdateRequest(BaseModel):
@@ -139,7 +142,8 @@ class LeadSubmitRequest(BaseModel):
         max_length=20,
         description="Phone in international format, e.g. +919876543210"
     )
-    # Honeypot — hidden from humans, filled by bots; must remain empty
+    # Anti-Spam & Linkage
+    visitor_uuid: Optional[str] = Field(None, description="Visitor's browser identity for session linking")
     hp_field: Optional[str] = Field(default="", description="Anti-spam honeypot. Must be empty.", json_schema_extra={"example": ""})
 
     # ---- Field Validators --------------------------------------------------

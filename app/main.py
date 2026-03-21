@@ -14,6 +14,7 @@ from app.api.admin import router as admin_router
 from app.api.sales import router as sales_router
 from app.api.live_chat import router as live_chat_router
 from app.api.ws_chat import router as ws_router, legacy_router as legacy_ws_router
+from app.services.live_chat_socket import init_live_chat_socket
 
 # ── Simplified Production-Ready Logging ──────────────────────────────
 logging.basicConfig(
@@ -29,6 +30,9 @@ async def lifespan(app: FastAPI):
     try:
         # init_db() now handles its own internal error logging and suppression
         init_db()
+        # Initialize live chat socket manager
+        init_live_chat_socket()
+        logger.info("Live chat socket manager initialized")
     except Exception as e:
         # This is a fallback in case init_db lets something through
         logger.error(f"Lifespan: Unhandled database initialization error: {e}")

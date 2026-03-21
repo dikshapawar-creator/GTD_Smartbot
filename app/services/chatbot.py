@@ -18,7 +18,7 @@ STATE_QUESTIONS = {
     ChatState.START: "Welcome! Are you interested in Import or Export?",
     ChatState.TRADE_TYPE: "Which country are you interested in?",
     ChatState.COUNTRY: "What product are you dealing with?",
-    ChatState.PRODUCT: "Great! May I have your full name?",
+    ChatState.PRODUCT: "Great choice! To get detailed insights on this product, please Book a Demo with our experts.",
     ChatState.NAME: "What is your email address?",
     ChatState.EMAIL: "Which company do you represent?",
     ChatState.COMPANY: "What is your contact phone number?",
@@ -68,30 +68,23 @@ class ChatbotService:
         next_state = current_state
         bot_response = ""
         
-        if current_state == ChatState.TRADE_TYPE:
-            lead.trade_type = user_message
-            next_state = ChatState.COUNTRY
-            bot_response = STATE_QUESTIONS[ChatState.TRADE_TYPE] # "Which country..."
-            
-        elif current_state == ChatState.COUNTRY:
+        if current_state == ChatState.START:
+             # Handle the initial response to "Import or Export?"
+             lead.trade_type = user_message
+             next_state = ChatState.TRADE_TYPE
+             bot_response = STATE_QUESTIONS[ChatState.TRADE_TYPE] # "Which country..."
+             
+        elif current_state == ChatState.TRADE_TYPE:
             lead.country_interested = user_message
-            next_state = ChatState.PRODUCT
+            next_state = ChatState.COUNTRY
             bot_response = STATE_QUESTIONS[ChatState.COUNTRY] # "What product..."
             
-        elif current_state == ChatState.PRODUCT:
+        elif current_state == ChatState.COUNTRY:
             lead.product = user_message
             # STOP asking for Name/Email/Phone. 
             # Redirect to CTA.
-            next_state = ChatState.COMPLETE ## Or remain in PRODUCT? Let's say COMPLETE for now or a new terminal state.
-            bot_response = "Great choice! To get detailed insights on this product, please Book a Demo with our experts."
-            
-        elif current_state == ChatState.START:
-             # Basic state transition if they answer the first question
-             # But usually the first question is handled by the welcome message.
-             # If they reply to "Import or Export?", we assume it's trade type.
-             lead.trade_type = user_message
-             next_state = ChatState.COUNTRY
-             bot_response = STATE_QUESTIONS[ChatState.TRADE_TYPE]
+            next_state = ChatState.COMPLETE
+            bot_response = STATE_QUESTIONS[ChatState.PRODUCT] # "Great choice! To get detailed insights..."
 
         elif current_state == ChatState.COMPLETE:
             # They replied after the CTA — acknowledge and end gracefully
@@ -115,7 +108,7 @@ class ChatbotService:
         session_service.save_message(db, chat_session, bot_response, "bot")
 
         # 6. Return response with CTA if we reached the CTA point
-        if next_state == ChatState.COMPLETE and current_state == ChatState.PRODUCT:
+        if next_state == ChatState.COMPLETE and current_state == ChatState.COUNTRY:
              return {
                 "message": bot_response,
                 "state": next_state,

@@ -38,7 +38,7 @@ async def initialize_session(request: Request, response: Response, init_req: Opt
         # Verify session is truly active and exists
         if active_session and active_session.session_status == SessionStatus.ACTIVE:
             return {
-                "session_token": str(active_session.session_uuid),
+                "session_token": str(active_session.visitor_uuid),
                 "message": "Welcome back to GTD Service! How can I assist with your trade intelligence today?",
                 "state": active_session.chat_state,
                 "type": "CTA",
@@ -88,10 +88,10 @@ async def initialize_session(request: Request, response: Response, init_req: Opt
         existing_session = consolidate_visitor_sessions(db, visitor_uuid_ext)
         
         if existing_session:
-            logger.info(f"[SESSION_INIT] REUSING existing session {existing_session.session_id} (UUID: {existing_session.session_uuid}) for visitor {visitor_uuid_ext}")
+            logger.info(f"[SESSION_INIT] REUSING existing session {existing_session.session_id} for visitor {visitor_uuid_ext}")
             # Update activity timestamp
-            existing_session.last_activity_utc = session_service._now_utc()
-            existing_session.last_seen_at = session_service._now_utc()
+            existing_session.last_activity_utc = datetime.now(timezone.utc)
+            existing_session.last_seen_at = datetime.now(timezone.utc)
             db.commit()
             new_session = existing_session
             is_returning = True
@@ -138,19 +138,19 @@ async def initialize_session(request: Request, response: Response, init_req: Opt
             visitor_uuid=visitor_uuid_ext,
             lead_id=carry_over_lead_id # 🔥 Identity Retention
         )
-        logger.info(f"[SESSION_INIT] NEW session created: {new_session.session_id} (UUID: {new_session.session_uuid})")
+        logger.info(f"[SESSION_INIT] NEW session created: {new_session.session_id}")
     
     # 🚨 COMMIT BEFORE BROADCAST
     db.commit()
 
     # 🔥 Immediately broadcast to CRM
     from app.core.socket_manager import socket_manager
-    from app.api.live_chat import _assemble_items
+    from app.api.live_chat import format_session_for_crm
     
-    session_item = _assemble_items([(new_session, None)], db)[0]
+    session_item = format_session_for_crm(new_session)
     await socket_manager.broadcast_event(
         "NEW_CONVERSATION", 
-        session_item.model_dump(mode="json")
+        session_item
     )
 
     # Fetch professional greeting from DB for consistency
@@ -169,7 +169,7 @@ async def initialize_session(request: Request, response: Response, init_req: Opt
     )
 
     return {
-        "session_token": str(new_session.session_uuid),
+        "session_token": str(new_session.visitor_uuid),
         "message": greeting_res["message"],
         "state": ChatState.START,
         "type": "CTA",
@@ -205,7 +205,7 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
     if not session_id:
         raise HTTPException(status_code=401, detail="Session required.")
 
-    # 🔧 FIX: The session_id we get is actually a session_uuid, so we need to handle it properly
+    # 🔧 FIX: The session_id we get might be a visitor_uuid from the bearer token
     try:
         active_session = session_service.get_active_session(db, session_id)
         if not active_session:
@@ -245,15 +245,15 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
         await socket_manager.broadcast_event(
             "NEW_MESSAGE",
             {
-                "session_id": str(active_session.session_uuid),
+                "session_id": str(active_session.visitor_uuid),
                 "message": msg_req.message,
                 "sender": "user",
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat()
             }
         )
 
         return {
-            "sessionId": str(active_session.session_uuid),
+            "sessionId": str(active_session.visitor_uuid),
             "message": "", 
             "type": ResponseType.MESSAGE,
             "state": active_session.chat_state,
@@ -271,7 +271,7 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
         active_session.session_status = SessionStatus.CLOSED
         db.commit()
         return {
-            "sessionId": str(active_session.session_uuid),
+            "sessionId": str(active_session.visitor_uuid),
             "message": "Security policy violation detected. Session closed.",
             "state": active_session.chat_state,
             "conversation_status": active_session.conversation_mode,
@@ -316,7 +316,38 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
         await socket_manager.broadcast_event(
             "NEW_MESSAGE",
             {
-                "session_id": str(active_session.session_uuid),
+                "session_id": str(active_session.visitor_uuid),
+                "message": user_message,
+                "sender": "user",
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+        )
+        await socket_manager.broadcast_event(
+            "NEW_MESSAGE",
+            {
+                "session_id": str(active_session.visitor_uuid),
+                "message": bot_msg,
+                "sender": "bot",
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+        )
+        
+        return {
+            "sessionId": str(active_session.visitor_uuid),
+            "message": bot_msg,
+            "state": active_session.chat_state,
+            "conversation_status": active_session.conversation_mode,
+            "server_time_utc": datetime.now(timezone.utc)
+        }
+
+    # Helper function to broadcast messages and return response
+    async def broadcast_and_return(bot_message: str, response_data: dict):
+        # Broadcast both user and bot messages to CRM
+        from app.core.socket_manager import socket_manager
+        await socket_manager.broadcast_event(
+            "NEW_MESSAGE",
+            {
+                "session_id": str(active_session.visitor_uuid),
                 "message": user_message,
                 "sender": "user",
                 "timestamp": datetime.utcnow().isoformat()
@@ -325,154 +356,124 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
         await socket_manager.broadcast_event(
             "NEW_MESSAGE",
             {
-                "session_id": str(active_session.session_uuid),
-                "message": bot_msg,
+                "session_id": str(active_session.visitor_uuid),
+                "message": bot_message,
                 "sender": "bot",
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat()
             }
         )
         
-        return {
-            "sessionId": str(active_session.session_uuid),
+        # If lead was updated, broadcast session update
+        if active_session.lead_id:
+            from app.api.live_chat import format_session_for_crm
+            session_item = format_session_for_crm(active_session)
+            await socket_manager.broadcast_event(
+                "SESSION_UPDATED", 
+                session_item
+            )
+        
+        return response_data
+
+    # Use the ChatbotService for consistent state management
+    from app.services.chatbot import ChatbotService
+    
+    # Handle greetings first - with CTA
+    if intent == IntentType.GREETING and not active_session.has_greeted:
+        config = db.query(IntentConfig).filter(IntentConfig.intent_key == "GREETING").first()
+        bot_msg = config.response_text if config else "Hello! Welcome to GTD Service! Are you interested in Import or Export?"
+        active_session.has_greeted = True
+        active_session.chat_state = ChatState.START
+        db.commit()
+        session_service.save_message(db, active_session, bot_msg, "bot")
+        db.commit()
+        
+        # Return CTA response for greeting too
+        return await broadcast_and_return(bot_msg, {
+            "sessionId": str(active_session.visitor_uuid),
             "message": bot_msg,
             "state": active_session.chat_state,
+            "type": ResponseType.CTA,
+            "cta_label": "Book Demo",
+            "action": "OPEN_LEAD_FORM",
             "conversation_status": active_session.conversation_mode,
             "server_time_utc": datetime.now(timezone.utc)
-        }
-
-    # 2a. Handle Greetings (Dynamic)
-    if intent == IntentType.GREETING:
-        config = db.query(IntentConfig).filter(IntentConfig.intent_key == "GREETING").first()
-        if not active_session.has_greeted:
-            bot_msg = config.response_text if config else "Hello! How can I assist you today?"
-            active_session.has_greeted = True
-        else:
-            bot_msg = "Hello! How can I assist you further with your trade intelligence today?"
-        
-        db.commit()
-        session_service.save_message(db, active_session, bot_msg, "bot")
-        db.commit()
-
-    # 2b. Start Lead Flow (Intent: REQUEST_DEMO or LEAD_COLLECTION)
-    elif (intent in [IntentType.REQUEST_DEMO, IntentType.LEAD_COLLECTION, IntentType.DEMO]) and (current_state == ChatState.START):
-        config = db.query(IntentConfig).filter(IntentConfig.intent_key == intent.value).first()
-        bot_msg = config.response_text if config else "I can help you with that. To assist you better, please share your details.\n\nMay I know your Full Name?"
-        
-        # We append the name question if it's the start of lead capture
-        if "Full Name" not in bot_msg:
-            bot_msg += "\n\nMay I know your Full Name?"
-            
-        active_session.chat_state = ChatState.NAME
-        db.commit()
-        session_service.save_message(db, active_session, bot_msg, "bot")
-        db.commit()
-
-    # 2c. Handle Specialized Trade Intents (Dynamic)
+        })
+    
+    # Handle specialized intents with immediate CTA
     elif intent in [
+        IntentType.REQUEST_DEMO, IntentType.LEAD_COLLECTION, IntentType.DEMO,
         IntentType.BUYER_SEARCH, IntentType.SUPPLIER_SEARCH, IntentType.HS_CODE_SEARCH,
         IntentType.COMPETITOR_ANALYSIS, IntentType.SHIPMENT_RECORDS, 
         IntentType.COUNTRY_TRADE_ANALYSIS, IntentType.PRODUCT_MARKET_RESEARCH,
         IntentType.PRICING_INQUIRY, IntentType.IMPORT_EXPORT
     ]:
         config = db.query(IntentConfig).filter(IntentConfig.intent_key == intent.value).first()
-        bot_msg = config.response_text if config else "I can certainly help you with that. What specific product or HS code are you interested in?"
+        if config and config.response_text:
+            bot_msg = config.response_text
+        else:
+            bot_msg = "Great choice! To get detailed insights and personalized assistance, please Book a Demo with our experts."
         
+        active_session.chat_state = ChatState.COMPLETE
+        db.commit()
         session_service.save_message(db, active_session, bot_msg, "bot")
         db.commit()
-
-    # 2d. Lead Capture State Machine (Continued)
-    elif current_state in [ChatState.NAME, ChatState.COMPANY, ChatState.EMAIL, ChatState.PHONE]:
-        lead = None
-        if active_session.lead_id:
-            lead = db.query(Lead).filter(Lead.id == active_session.lead_id).first()
-
-        def update_lead(field, value):
-            nonlocal lead
-            if not lead:
-                 placeholder_email = f"pending_{active_session.session_id}@gtdservice.local"
-                 lead = Lead(
-                     name=value if field == "name" else "Visitor",
-                     email=placeholder_email, 
-                     phone="Pending",
-                     company="Pending",
-                     status="IN_PROGRESS",
-                     source="chatbot",
-                     tenant_id=active_session.tenant_id
-                 )
-                 db.add(lead)
-                 db.flush()
-                 active_session.lead_id = str(lead.id)
-            else:
-                if field == "name": lead.name = value
-                elif field == "company": lead.company = value
-                elif field == "email": lead.email = value
-                elif field == "phone": lead.phone = value
-            db.commit()
-
-        if current_state == ChatState.NAME:
-            update_lead("name", user_message)
-            active_session.chat_state = ChatState.COMPANY
-            bot_msg = "Thank you.\n\nMay I know your Company Name?"
-        elif current_state == ChatState.COMPANY:
-            update_lead("company", user_message)
-            active_session.chat_state = ChatState.EMAIL
-            bot_msg = "Please share your Business Email."
-        elif current_state == ChatState.EMAIL:
-            update_lead("email", user_message)
-            active_session.chat_state = ChatState.PHONE
-            bot_msg = "May I have your Contact Number?"
-        elif current_state == ChatState.PHONE:
-            update_lead("phone", user_message)
-            active_session.chat_state = ChatState.HANDOFF_SENT
-            bot_msg = (
-                "Thank you for sharing the details.\n\n"
-                "Please wait while I connect you with our trade expert."
-            )
         
-        db.commit()
-        session_service.save_message(db, active_session, bot_msg, "bot")
-        db.commit()
-
-    else:
-        # Fallback for UNKNOWN intent or other states
-        bot_msg = "I'm not sure I understand. How else can I assist you with your trade needs? You can ask about buyers, suppliers, HS codes, or request a demo."
-        session_service.save_message(db, active_session, bot_msg, "bot")
-        db.commit()
-
-    #  Broadcast both user and bot messages to CRM
-    from app.core.socket_manager import socket_manager
-    await socket_manager.broadcast_event(
-        "NEW_MESSAGE",
-        {
-            "session_id": session_id,
-            "message": user_message,
-            "sender": "user",
-            "timestamp": datetime.utcnow().isoformat()
-        }
-    )
-    await socket_manager.broadcast_event(
-        "NEW_MESSAGE",
-        {
-            "session_id": session_id,
+        # Return CTA response for immediate lead form
+        return await broadcast_and_return(bot_msg, {
+            "sessionId": str(active_session.visitor_uuid),
             "message": bot_msg,
-            "sender": "bot",
-            "timestamp": datetime.utcnow().isoformat()
-        }
-    )
+            "state": active_session.chat_state,
+            "type": ResponseType.CTA,
+            "cta_label": "Book Demo",
+            "action": "OPEN_LEAD_FORM",
+            "conversation_status": active_session.conversation_mode,
+            "server_time_utc": datetime.now(timezone.utc)
+        })
     
-    # If lead was updated, broadcast session update
-    if active_session.lead_id:
-        from app.api.live_chat import _assemble_items
-        session_item = _assemble_items([(active_session, None)], db)[0]
-        await socket_manager.broadcast_event(
-            "SESSION_UPDATED", 
-            session_item.model_dump(mode="json")
-        )
+    # Use ChatbotService for the main conversation flow - with CTA
+    else:
+        try:
+            chatbot_response = ChatbotService.handle_message(db, active_session, translated_message)
+            bot_msg = chatbot_response.get("message", "")
+            
+            # Always return CTA response for ChatbotService responses too
+            return await broadcast_and_return(bot_msg, {
+                "sessionId": str(active_session.visitor_uuid),
+                "message": bot_msg,
+                "state": chatbot_response.get("state", active_session.chat_state),
+                "type": ResponseType.CTA,
+                "cta_label": chatbot_response.get("cta_label", "Book Demo"),
+                "action": chatbot_response.get("action", "OPEN_LEAD_FORM"),
+                "conversation_status": active_session.conversation_mode,
+                "server_time_utc": datetime.now(timezone.utc)
+            })
+        except Exception as e:
+            logger.error(f"ChatbotService error: {e}")
+            bot_msg = "I'm here to help! Are you interested in Import or Export services?"
+            session_service.save_message(db, active_session, bot_msg, "bot")
+            db.commit()
+            
+            # Return CTA even for fallback messages
+            return await broadcast_and_return(bot_msg, {
+                "sessionId": str(active_session.visitor_uuid),
+                "message": bot_msg,
+                "state": active_session.chat_state,
+                "type": ResponseType.CTA,
+                "cta_label": "Book Demo",
+                "action": "OPEN_LEAD_FORM",
+                "conversation_status": active_session.conversation_mode,
+                "server_time_utc": datetime.now(timezone.utc)
+            })
 
+    # This code should not be reached since all paths above return a response
+    # But keeping as a safety fallback
     return {
-        "sessionId": str(active_session.session_uuid),
-        "message": bot_msg,
+        "sessionId": str(active_session.visitor_uuid),
+        "message": "How can I assist you today?",
         "state": active_session.chat_state,
+        "type": ResponseType.CTA,
+        "cta_label": "Book Demo", 
+        "action": "OPEN_LEAD_FORM",
         "conversation_status": active_session.conversation_mode,
         "server_time_utc": datetime.utcnow()
     }
@@ -529,7 +530,7 @@ async def get_chat_history(request: Request, db: Session = Depends(get_db)):
         msg_obj = m[0] if isinstance(m, tuple) else m
         
         history.append({
-            "sessionId": str(active_session.session_uuid),
+            "sessionId": str(active_session.visitor_uuid),
             "message": msg_obj.message_text,
             "role": msg_obj.message_type, # Frontend expects 'role' for UI
             "state": active_session.chat_state, # Defaulting to current state

@@ -14,6 +14,7 @@ from app.models.auth import User
 from app.api.deps import require_role
 from app.models.lead import Lead, LeadStatusHistory, LeadStatus
 from app.models.chat_session import ChatSession, SessionStatus, ConversationMode
+from app.models.chat_message import ChatMessage
 from app.core.utils import is_valid_uuid
 
 from app.schemas.chatbot import (
@@ -51,7 +52,7 @@ async def submit_lead(
     from app.services import lead_service, session_service
     from app.core.config import settings as app_settings
     from app.core.socket_manager import socket_manager
-    from app.api.live_chat import _assemble_items
+    from app.api.live_chat import format_session_for_crm
 
     try:
         # 0. Anti-Bot Protection (Honeypot)
@@ -73,14 +74,26 @@ async def submit_lead(
         # 1. Get Session & Tenant (if possible)
         session_id = request.cookies.get(settings.SESSION_COOKIE_NAME)
         chat_session = None
-        current_tenant_id = settings.DEFAULT_TENANT_ID # Use system default instead of hardcoded 1
+        current_tenant_id = settings.DEFAULT_TENANT_ID 
 
-        if session_id and is_valid_uuid(session_id):
-            chat_session = db.query(ChatSession).filter(ChatSession.session_uuid == session_id).first()
-            if chat_session:
-                current_tenant_id = chat_session.tenant_id
+        # Priority 1: Use visitor_uuid from body
+        if lead_req.visitor_uuid:
+            chat_session = db.query(ChatSession).filter(
+                ChatSession.visitor_uuid == lead_req.visitor_uuid,
+                ChatSession.is_deleted == False
+            ).order_by(ChatSession.last_activity_utc.desc()).first()
+        
+        # Priority 2: Fallback to session_id cookie if visitor_uuid didn't find anything
+        if not chat_session and session_id and is_valid_uuid(session_id):
+            chat_session = db.query(ChatSession).filter(ChatSession.session_id == session_id).first()
+
+        if chat_session:
+            current_tenant_id = chat_session.tenant_id
         elif session_id:
-             logger.warning(f"Invalid session_id cookie received during lead submission: {session_id}")
+             logger.warning(f"No active session found for session_id: {session_id} or visitor_uuid: {lead_req.visitor_uuid}")
+
+        # 1.1 Extract Identification for Lead (DEPRECATED metadata columns)
+        lead_metadata = {}
 
         # 2. Process Lead (Create or Update Duplicate)
         lead, is_duplicate = lead_service.create_or_update_lead(
@@ -88,22 +101,50 @@ async def submit_lead(
             lead_req, 
             tenant_id=current_tenant_id, 
             source="chatbot",
-            session_id=str(chat_session.session_id) if chat_session else None
+            session_id=str(chat_session.session_id) if chat_session else None,
+            metadata=lead_metadata
         )
 
-        # 3. Trigger Agent Takeover if session exists
-        takeover_triggered = False
+        # 3. Update session if exists (link lead to session)
         if chat_session:
-            # 🔥 Relational Linkage
-            takeover_triggered = session_service.trigger_agent_takeover(db, session_id, str(lead.id))
+            # Update session with lead information
+            chat_session.lead_id = str(lead.id)
+            chat_session.lead_name = lead_req.full_name
+            chat_session.lead_email = lead_req.business_email
+            chat_session.lead_phone = lead_req.contact_number
+            chat_session.lead_company = lead_req.company_name
+            chat_session.last_activity_at = datetime.now(timezone.utc)
+            chat_session.last_activity_utc = datetime.now(timezone.utc)
+            
+            # 3.1 Insert Automated History Message
+            system_msg = ChatMessage(
+                session_id=chat_session.session_id,
+                message=f"System: Lead form submitted. Name: {lead_req.full_name}, Email: {lead_req.business_email}, Phone: {lead_req.contact_number}, Company: {lead_req.company_name}",
+                role="system",
+                sender_type="system",
+                created_at=datetime.now(timezone.utc)
+            )
+            db.add(system_msg)
+            db.commit()
             
             # 🔥 Broadcast SESSION_UPDATED to Dashboard (Real-time CRM Sync)
-            session_item = _assemble_items([(chat_session, None)], db)[0]
+            session_item = format_session_for_crm(chat_session)
             await socket_manager.broadcast_event(
                 "SESSION_UPDATED", 
-                session_item.model_dump(mode="json")
+                session_item
             )
-            logger.info(f"Broadcasted takeover for session {session_id} to leads {lead.id}")
+            
+            # Also broadcast the new system message
+            await socket_manager.broadcast_event(
+                "NEW_MESSAGE",
+                {
+                    "session_id": chat_session.session_id,
+                    "message": system_msg.message,
+                    "role": "system",
+                    "created_at": system_msg.created_at.isoformat()
+                }
+            )
+            logger.info(f"Updated session {chat_session.session_id} with lead {lead.id}")
         else:
             logger.warning("No session_id cookie found during lead submission")
 
@@ -111,8 +152,7 @@ async def submit_lead(
             "success": True,
             "message": "Thank you. Our team will contact you soon.",
             "warning": "This email matches an existing record. Your request has been updated." if is_duplicate else None,
-            "reference_id": str(lead.id),
-            "takeover_triggered": takeover_triggered
+            "reference_id": str(lead.id)
         }
     except IntegrityError as e:
         db.rollback()

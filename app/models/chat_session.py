@@ -4,8 +4,9 @@ Includes enterprise features: inactivity tracking, metrics, optimized indexing,
 and human agent takeover state management.
 """
 import uuid
+import json
 from sqlalchemy import (
-    Column, String, DateTime, Boolean, BigInteger, Integer, Index, ForeignKey, Enum
+    Column, String, DateTime, Boolean, BigInteger, Integer, Index, ForeignKey, Enum, Text
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.mssql import UNIQUEIDENTIFIER
@@ -14,13 +15,17 @@ import enum
 
 
 class SessionStatus(str, enum.Enum):
-    ACTIVE = "ACTIVE"
-    CLOSED = "CLOSED"
+    ACTIVE   = "active"
+    CLOSED   = "ended"
+    BOT      = "bot"
+    HUMAN    = "agent"
+    WAITING  = "waiting"
+    ARCHIVED = "archived"
 
 
 class ConversationMode(str, enum.Enum):
-    BOT = "BOT"
-    HUMAN = "HUMAN"
+    BOT = "bot"
+    HUMAN = "agent"
 
 
 class ChatSession(Base):
@@ -33,7 +38,6 @@ class ChatSession(Base):
 
     # Server-generated UUID v4
     session_id = Column(String(36), nullable=False, unique=True, index=True)
-    session_uuid = Column(UNIQUEIDENTIFIER, nullable=False, unique=True, index=True, default=uuid.uuid4)
 
     # Ownership & Linkage
     user_id = Column(String(255), nullable=True)
@@ -42,12 +46,13 @@ class ChatSession(Base):
     # Relationships
     lead = relationship("Lead", back_populates="chat_sessions")
 
-    # IP & Identity Tracking
+    # IP & Identity Tracking with JSON metadata
     initial_ip = Column(String(45), nullable=True) # Static per session
     last_seen_ip = Column(String(45), nullable=True) # Tracks mobile rotation
     last_seen_at = Column(DateTime, nullable=True)
     visitor_fingerprint = Column(String(12), nullable=True, index=True) # Device identity
     visitor_uuid = Column(String(64), nullable=False, index=True) # Required browser identity
+    ip_metadata = Column(Text, nullable=True)  # JSON field for additional IP/device data
     
     # Geolocation
     country = Column(String(100), nullable=True)
@@ -61,30 +66,26 @@ class ChatSession(Base):
     device_type = Column(String(50), nullable=True)
 
     # Lifecycle State
-    session_status = Column(
-        Enum(SessionStatus, name="session_status_enum"), 
-        nullable=False, 
-        default=SessionStatus.ACTIVE, 
-        index=True
-    )
+    session_status = Column(String(50), nullable=False, default=SessionStatus.ACTIVE, index=True)
     
     # Handler State
-    conversation_mode = Column(
-        Enum(ConversationMode, name="conversation_mode_enum"), 
-        nullable=False, 
-        default=ConversationMode.BOT, 
-        index=True
-    )
+    current_mode = Column(String(20), nullable=False, default=ConversationMode.BOT, index=True)
+    
+    # Keep legacy field for compatibility
+    conversation_mode = Column(String(20), nullable=False, default=ConversationMode.BOT, index=True)
 
     # Lifecycle Timestamps
+    created_at = Column(DateTime, nullable=False, index=True)
     started_at_utc = Column(DateTime, nullable=False, index=True)
     started_at_local = Column(DateTime, nullable=False)
+    last_activity_at = Column(DateTime, nullable=False, index=True)
     last_activity_utc = Column(DateTime, nullable=False, index=True)
     ended_at_utc = Column(DateTime, nullable=True)
     ended_at_local = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, nullable=True)
     
     # Agent Assignment
+    agent_name = Column(String(255), nullable=True)
     assigned_agent_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
     assigned_at = Column(DateTime, nullable=True)
 
@@ -94,12 +95,19 @@ class ChatSession(Base):
     is_active = Column(Boolean, default=True, nullable=False)  # DB has this as NOT NULL BIT
 
     # Metrics & UI Helpers
+    message_count = Column(Integer, default=0, nullable=False)
     total_messages = Column(Integer, default=0, nullable=False)
     duration_seconds = Column(Integer, nullable=True)
     is_locked = Column(Boolean, default=False, nullable=False)
     agent_joined = Column(Boolean, default=False, nullable=False) # Bot uses this to stop replying
     has_greeted = Column(Boolean, default=False, nullable=False)
     chat_state = Column(String(50), nullable=False, default="START")
+    
+    # Lead Information
+    lead_name = Column(String(255), nullable=True)
+    lead_email = Column(String(255), nullable=True)
+    lead_phone = Column(String(50), nullable=True)
+    lead_company = Column(String(255), nullable=True)
     
     # Analytics & Scoring Extensions
     lead_score = Column(Integer, nullable=False, default=0)
@@ -108,7 +116,25 @@ class ChatSession(Base):
     language = Column(String(50), nullable=True, default="en")
 
     # Legacy field (kept for migration compatibility) — non-nullable in some DB versions
-    status = Column(String(50), nullable=False, default="ACTIVE")
+    status = Column(String(50), nullable=False, default="active")
+
+    @property
+    def ip_metadata_dict(self):
+        """Parse ip_metadata JSON field."""
+        if self.ip_metadata:
+            try:
+                return json.loads(self.ip_metadata)
+            except (json.JSONDecodeError, TypeError):
+                return {}
+        return {}
+
+    @ip_metadata_dict.setter
+    def ip_metadata_dict(self, value):
+        """Set ip_metadata as JSON string."""
+        if value:
+            self.ip_metadata = json.dumps(value)
+        else:
+            self.ip_metadata = None
 
     __table_args__ = (
         # ── Primary query: live dashboard — tenant's active sessions by recency

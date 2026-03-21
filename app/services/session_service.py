@@ -1,270 +1,397 @@
-"""
-SessionService — Enterprise DB-level session lifecycle management.
-Features: inactivity-based expiry, activity tracking, and engagement metrics.
-"""
+import hashlib
+import json
 import logging
-import uuid
-from datetime import datetime, timezone as dt_timezone, timedelta
-from uuid import uuid4
-from typing import Optional
-
-import pytz
+from datetime import datetime, timedelta
+from typing import Optional, List
 from sqlalchemy.orm import Session
-
+from sqlalchemy import select, and_
 from app.models.chat_session import ChatSession, SessionStatus, ConversationMode
-
 from app.models.chat_message import ChatMessage
-from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 
-def _now_utc() -> datetime:
-    """Return current UTC datetime (timezone-naive for SQL Server)."""
-    return datetime.now(dt_timezone.utc).replace(tzinfo=None)
+class SessionService:
+    def __init__(self, db: Session):
+        self.db = db
 
+    def create_or_resume_session(
+        self,
+        fingerprint: str,
+        visitor_uuid: str,
+        ip: str,
+        user_agent: str,
+        browser: str = "Unknown",
+        os: str = "Unknown",
+        device_type: str = "desktop",
+    ) -> ChatSession:
+        """
+        Prevents duplicate queue cards by checking for existing active sessions.
+        Uses fingerprint hash to identify returning visitors.
+        """
+        cutoff = datetime.utcnow() - timedelta(minutes=30)
+        
+        # Check for existing active session
+        stmt = (
+            select(ChatSession)
+            .where(
+                and_(
+                    ChatSession.visitor_uuid == visitor_uuid,
+                    ChatSession.session_status.in_([SessionStatus.ACTIVE]),
+                    ChatSession.last_activity_at >= cutoff
+                )
+            )
+            .order_by(ChatSession.created_at.desc())
+            .limit(1)
+        )
+        
+        result = self.db.execute(stmt)
+        existing = result.scalar_one_or_none()
+        
+        if existing:
+            # Update last activity and return existing session
+            existing.last_activity_at = datetime.utcnow()
+            existing.last_activity_utc = datetime.utcnow()
+            existing.ip_metadata_dict = {
+                "ip": ip,
+                "user_agent": user_agent,
+                "browser": browser,
+                "os": os,
+                "device_type": device_type
+            }
+            self.db.commit()
+            self.db.refresh(existing)
+            return existing
+        
+        # Create new session
+        session_suffix = hashlib.sha256(
+            f"{fingerprint}{datetime.utcnow().isoformat()}".encode()
+        ).hexdigest()[:7]
+        
+        now = datetime.utcnow()
+        session = ChatSession(
+            session_id=session_id,
+            visitor_uuid=visitor_uuid,
+            session_status=SessionStatus.ACTIVE,
+            current_mode=ConversationMode.BOT,
+            conversation_mode=ConversationMode.BOT,  # Keep for compatibility
+            created_at=now,
+            started_at_utc=now,
+            started_at_local=now,
+            last_activity_at=now,
+            last_activity_utc=now,
+            initial_ip=ip,
+            browser=browser,
+            os=os,
+            device_type=device_type,
+            user_agent=user_agent
+        )
+        
+        # Set ip_metadata using the property
+        session.ip_metadata_dict = {
+            "ip": ip,
+            "user_agent": user_agent,
+            "browser": browser,
+            "os": os,
+            "device_type": device_type
+        }
+        
+        self.db.add(session)
+        self.db.commit()
+        self.db.refresh(session)
+        return session
 
-def _to_local(utc_dt: datetime, tz_str: str) -> datetime:
-    """Convert UTC datetime to local timezone (naive)."""
+    def update_session_from_lead_form(
+        self,
+        session_id: str,
+        lead_data: dict
+    ) -> ChatSession:
+        """
+        Updates session with lead form data and proper display name.
+        Called when visitor submits lead form through bot.
+        """
+        session = self.db.get(ChatSession, session_id)
+        if not session:
+            raise ValueError(f"Session {session_id} not found")
+        
+        # Extract name from lead form
+        full_name = lead_data.get("name") or lead_data.get("fullName", "")
+        
+        # Update session with lead info
+        session.lead_name = full_name
+        session.lead_email = lead_data.get("email")
+        session.lead_phone = lead_data.get("phone")
+        session.lead_company = lead_data.get("company")
+        session.last_activity_at = datetime.utcnow()
+        session.last_activity_utc = datetime.utcnow()
+        
+        # Calculate lead score
+        session.lead_score = self._calculate_lead_score(lead_data)
+        session.lead_status = self._get_lead_status_from_score(session.lead_score)
+        
+        self.db.commit()
+        self.db.refresh(session)
+        return session
+
+    def get_active_sessions(self) -> List[ChatSession]:
+        """Get all active sessions for the live chat dashboard."""
+        stmt = (
+            select(ChatSession)
+            .where(ChatSession.session_status.in_(["active", "bot"]))
+            .order_by(ChatSession.last_activity_at.desc())
+        )
+        
+        result = self.db.execute(stmt)
+        return list(result.scalars().all())
+
+    def agent_takeover(self, session_id: str, agent_name: str) -> ChatSession:
+        """Handle agent takeover of bot conversation."""
+        session = self.db.get(ChatSession, session_id)
+        if not session:
+            raise ValueError(f"Session {session_id} not found")
+        
+        session.current_mode = ConversationMode.HUMAN
+        session.conversation_mode = ConversationMode.HUMAN  # Keep for compatibility
+        session.session_status = SessionStatus.ACTIVE
+        session.agent_name = agent_name
+        session.is_locked = True
+        session.agent_joined = True
+        session.last_activity_at = datetime.utcnow()
+        session.last_activity_utc = datetime.utcnow()
+        
+        self.db.commit()
+        self.db.refresh(session)
+        return session
+
+    def end_session(self, session_id: str) -> ChatSession:
+        """End a chat session."""
+        session = self.db.get(ChatSession, session_id)
+        if not session:
+            # Fallback for string-based custom ID lookup if PK retrieval fails
+            if isinstance(session_id, str) and not session_id.isdigit():
+                 session = self.db.query(ChatSession).filter(ChatSession.session_id == session_id).first()
+            
+        if not session:
+            raise ValueError(f"Session {session_id} not found")
+        
+        session.session_status = SessionStatus.CLOSED
+        session.is_locked = False
+        session.agent_joined = False
+        session.last_activity_at = datetime.utcnow()
+        session.last_activity_utc = datetime.utcnow()
+        session.ended_at_utc = datetime.utcnow()
+        session.ended_at_local = datetime.utcnow()
+        
+        self.db.commit()
+        self.db.refresh(session)
+        return session
+
+    def _calculate_lead_score(self, lead_data: dict) -> int:
+        """Calculate lead score based on form completeness and content."""
+        score = 0
+        
+        # Base score for form submission
+        score += 20
+        
+        # Score for each filled field
+        fields = ["name", "email", "phone", "company", "interest"]
+        for field in fields:
+            if lead_data.get(field):
+                score += 10
+        
+        # Bonus for business email domains
+        email = lead_data.get("email", "")
+        if email and not any(domain in email.lower() for domain in ["gmail", "yahoo", "hotmail", "outlook"]):
+            score += 15
+        
+        # Bonus for company name
+        if lead_data.get("company"):
+            score += 10
+        
+        return min(score, 100)  # Cap at 100
+
+    def _get_lead_status_from_score(self, score: int) -> str:
+        """Convert numeric score to status string."""
+        if score >= 70:
+            return "HOT"
+        elif score >= 40:
+            return "WARM"
+        else:
+            return "COLD"
+
+    def _get_display_name(self, session: ChatSession) -> str:
+        """Get proper display name for session."""
+        if session.lead_name:
+            return session.lead_name
+        
+        # Use visitor UUID last 6 characters
+        return f"Visitor #{session.visitor_uuid[-6:].upper()}"
+
+# Module-level functions for backward compatibility
+def get_active_session(db: Session, session_id: str) -> Optional[ChatSession]:
+    """Get active session by session_id (UUID). Module-level function for backward compatibility."""
+    from sqlalchemy import select, and_
+    
     try:
-        tz = pytz.timezone(tz_str)
-        utc_aware = pytz.utc.localize(utc_dt)
-        local_aware = utc_aware.astimezone(tz)
-        return local_aware.replace(tzinfo=None)
-    except Exception:
-        return utc_dt
+        # Try to find by visitor_uuid first (most common case) - get the most recent one
+        stmt = (
+            select(ChatSession)
+            .where(
+                and_(
+                    ChatSession.visitor_uuid == session_id,
+                    ChatSession.session_status == SessionStatus.ACTIVE
+                )
+            )
+            .order_by(ChatSession.last_activity_at.desc())
+            .limit(1)
+        )
+        result = db.execute(stmt)
+        session = result.scalar_one_or_none()
+        
+        if session:
+            return session
+            
+        # If not found by visitor_uuid, try by session_id (legacy) - get the most recent one
+        stmt = (
+            select(ChatSession)
+            .where(
+                and_(
+                    ChatSession.session_id == session_id,
+                    ChatSession.session_status == SessionStatus.ACTIVE
+                )
+            )
+            .order_by(ChatSession.last_activity_at.desc())
+            .limit(1)
+        )
+        result = db.execute(stmt)
+        return result.scalar_one_or_none()
+        
+    except Exception as e:
+        logger.error(f"Error getting active session: {e}")
+        return None
 
-
+# Module-level function for backward compatibility with chatbot.py
 def create_session(
     db: Session,
     ip_address: str,
-    country: str,
-    city: str,
-    timezone_str: str,
-    user_agent: str = "Unknown",
+    country: str = None,
+    city: str = None,
+    timezone_str: str = None,
+    user_agent: str = None,
     browser: str = "Unknown",
-    os_name: str = "Unknown",
-    device_type: str = "Desktop",
-    fingerprint: Optional[str] = None,
-    tenant_id: int = 1,
-    visitor_uuid: Optional[str] = None,
-    lead_id: Optional[str] = None,
+    os_name: str = "Unknown", 
+    device_type: str = "desktop",
+    fingerprint: str = None,
+    tenant_id: int = None,
+    visitor_uuid: str = None,
+    lead_id: int = None
 ) -> ChatSession:
-    """Creates a new session with senior IP & metadata tracking."""
-    import time
-    from sqlalchemy.exc import OperationalError
-
-    def _do_insert(db: Session) -> ChatSession:
-        s_uuid = uuid4()
-        session_id = str(s_uuid)
-        now_utc = _now_utc()
-        now_local = _to_local(now_utc, timezone_str)
-        
-        # Normalize visitor_uuid
-        v_uuid = str(visitor_uuid) if visitor_uuid else str(uuid.uuid4())
-
-        logger.info(f"Creating session with visitor_uuid: {v_uuid}, lead_id: {lead_id}")
-
-        chat_session = ChatSession(
-            session_id=session_id,
-            session_uuid=s_uuid,
-            tenant_id=tenant_id,
-            visitor_uuid=v_uuid,
-            lead_id=lead_id, # Link to existing lead if provided
-            initial_ip=ip_address,
-            last_seen_ip=ip_address,
-            last_seen_at=now_utc,
-            visitor_fingerprint=fingerprint,
-            user_agent=user_agent,
-            browser=browser,
-            os=os_name,
-            device_type=device_type,
-            country=country,
-            city=city,
-            timezone=timezone_str,
-            started_at_utc=now_utc,
-            started_at_local=now_local,
-            last_activity_utc=now_utc,
-            total_messages=0,
-            session_status=SessionStatus.ACTIVE,
-            conversation_mode=ConversationMode.BOT,
-            status="ACTIVE",
-            is_deleted=False,
-        )
-        db.add(chat_session)
-        db.commit()
-        db.refresh(chat_session)
-        return chat_session
-
-    try:
-        chat_session = _do_insert(db)
-    except OperationalError as e:
-        # ── Transient connection failure: invalidate + retry once ────────
-        # Covers: ('08S01', 'Communication link failure') and similar
-        logger.warning(
-            f"session_service.create_session: Transient DB error, invalidating connection and retrying. Error: {e}"
-        )
-        try:
-            db.rollback()
-            # Invalidate the specific connection instead of disposing the whole pool
-            try:
-                db.connection().invalidate()
-            except Exception:
-                pass
-        except Exception:
-            pass
-        time.sleep(0.5)  # Brief pause to allow pool to establish a fresh connection
-        # Re-raise if the retry also fails — error will bubble up to the API handler
-        chat_session = _do_insert(db)
-
-    session_id = chat_session.session_id
-    logger.info({
-        "event": "session_created",
-        "session_id": session_id,
-        "tenant_id": tenant_id,
-        "ip": ip_address,
-        "timestamp": _now_utc().isoformat()
-    })
-    return chat_session
-
-
-def get_active_session(db: Session, session_id: str, tenant_id: Optional[int] = None) -> Optional[ChatSession]:
-    """
-    Look up a session and check for inactivity-based expiry.
-    """
-    q = db.query(ChatSession).filter(
-        ChatSession.session_uuid == uuid.UUID(session_id), 
-        ChatSession.session_status == SessionStatus.ACTIVE,
-        ChatSession.is_deleted == False
-    )
-    if tenant_id is not None:
-        q = q.filter(ChatSession.tenant_id == tenant_id)
-        
-    chat_session = q.first()
-
-    if not chat_session:
-        return None
-
-    # Check for inactivity expiry
-    now_utc = _now_utc()
-    expiry_limit = timedelta(minutes=settings.SESSION_EXPIRY_MINUTES)
+    """Create a new chat session (synchronous version for backward compatibility)."""
+    import uuid
+    import hashlib
     
-    if now_utc - chat_session.last_activity_utc > expiry_limit:
-        logger.info({
-            "event": "session_expired_inactivity",
-            "session_id": session_id,
-        })
-        close_session(db, session_id, tenant_id)
-        return None
-
-    return chat_session
-
-
-def close_session(db: Session, session_id: str, tenant_id: Optional[int] = None) -> bool:
-    """Mark as CLOSED and calculate duration metric."""
-    q = (
-        db.query(ChatSession)
-        .filter(ChatSession.session_uuid == uuid.UUID(session_id), ChatSession.is_deleted == False)
-    )
-    if tenant_id is not None:
-        q = q.filter(ChatSession.tenant_id == tenant_id)
-        
-    chat_session = q.first()
-    if not chat_session or chat_session.session_status == SessionStatus.CLOSED:
-        return False
-
-    now_utc = _now_utc()
-    now_local = _to_local(now_utc, chat_session.timezone or "UTC")
-
-    chat_session.session_status = SessionStatus.CLOSED
-    chat_session.ended_at_utc = now_utc
-    chat_session.ended_at_local = now_local
-    chat_session.is_locked = False
+    # Generate visitor_uuid if not provided
+    if not visitor_uuid:
+        visitor_uuid = str(uuid.uuid4())
     
-    # Calculate duration
-    duration = (now_utc - chat_session.started_at_utc).total_seconds()
-    chat_session.duration_seconds = int(duration)
-
+    # Generate session_id (required field)
+    session_suffix = hashlib.sha256(
+        f"{fingerprint or visitor_uuid}{datetime.utcnow().isoformat()}".encode()
+    ).hexdigest()[:7]
+    session_id = f"session_{session_suffix}"
+    
+    now = datetime.utcnow()
+    
+    # Create new session
+    session = ChatSession(
+        session_id=session_id,  # Add the required session_id
+        visitor_uuid=visitor_uuid,
+        session_status=SessionStatus.ACTIVE,
+        current_mode=ConversationMode.BOT,
+        conversation_mode=ConversationMode.BOT,
+        created_at=now,
+        started_at_utc=now,
+        started_at_local=now,
+        last_activity_at=now,
+        last_activity_utc=now,
+        initial_ip=ip_address,
+        country=country,
+        city=city,
+        timezone=timezone_str,
+        user_agent=user_agent,
+        browser=browser,
+        os=os_name,
+        device_type=device_type,
+        visitor_fingerprint=fingerprint,
+        tenant_id=tenant_id or 1,  # Default tenant_id
+        lead_id=lead_id,
+        is_active=True,
+        message_count=0
+    )
+    
+    # Set ip_metadata using the property
+    if ip_address or user_agent:
+        session.ip_metadata_dict = {
+            "ip": ip_address,
+            "user_agent": user_agent,
+            "browser": browser,
+            "os": os_name,
+            "device_type": device_type
+        }
+    
+    db.add(session)
     db.commit()
-    logger.info({"event": "session_closed", "session_id": session_id})
-    return True
+    db.refresh(session)
+    
+    return session
 
-
-def update_chat_state(db: Session, chat_session: ChatSession, new_state: str) -> None:
-    chat_session.chat_state = new_state
-    chat_session.last_activity_utc = _now_utc()
-    db.commit()
-
-
-def save_message(
-    db: Session,
-    chat_session: ChatSession,
-    message_text: str,
-    message_type: str,
-) -> ChatMessage:
-    """
-    Persist message, update activity, increment total_messages, and handle versioning.
-    """
-    now_utc = _now_utc()
-    now_local = _to_local(now_utc, chat_session.timezone or "UTC")
-
-    # Create message
-    msg = ChatMessage(
-        session_id=chat_session.session_id,
+def save_message(db: Session, session: ChatSession, message_text: str, message_type: str) -> ChatMessage:
+    """Save a message to the database (synchronous version for backward compatibility)."""
+    now = datetime.utcnow()
+    
+    message = ChatMessage(
+        session_id=session.session_id,  # Use session_id (string) not id (BigInteger)
         message_type=message_type,
         message_text=message_text,
-        created_at_utc=now_utc,
-        created_at_local=now_local,
+        created_at=now,
+        created_at_utc=now,
+        created_at_local=now
     )
-    db.add(msg)
-
-    # Update session metrics and activity
-    chat_session.last_activity_utc = now_utc
-    chat_session.total_messages = (chat_session.total_messages or 0) + 1
     
-    # Optimistic locking increment
-    chat_session.version += 1
+    db.add(message)
+    
+    # Update session message count and activity
+    session.message_count = (session.message_count or 0) + 1
+    session.last_activity_at = now
+    session.last_activity_utc = now
+    
+    return message
 
+
+def update_chat_state(db: Session, session: ChatSession, new_state: str) -> None:
+    """Update the chat state of a session."""
+    session.chat_state = new_state
     db.commit()
-    return msg
 
-
-def trigger_agent_takeover(db: Session, session_id: str, lead_id: Optional[str] = None) -> bool:
-    """
-    Force transition to HUMAN mode and link lead.
-    Sets agent_joined=True so the bot completely stops replying.
-    """
-    chat_session = (
-        db.query(ChatSession)
-        .filter(
-            ChatSession.session_uuid == uuid.UUID(session_id), 
-            ChatSession.session_status == SessionStatus.ACTIVE,
-            ChatSession.is_deleted == False
-        )
-        .first()
-    )
-    if chat_session:
-        # 🔥 Hard Takeover: Disable Bot, Enable Human
-        chat_session.conversation_mode = ConversationMode.HUMAN
-        chat_session.agent_joined = True
-        chat_session.status = "human_required"
-        chat_session.last_activity_utc = _now_utc()
-        chat_session.updated_at = _now_utc()
+def close_session(db: Session, session_id: str) -> bool:
+    """Close a session by session_id (synchronous version for backward compatibility)."""
+    try:
+        # Try to find by visitor_uuid first
+        session = get_active_session(db, session_id)
         
-        if lead_id:
-            chat_session.lead_id = lead_id
+        if session:
+            session.session_status = SessionStatus.CLOSED
+            session.is_active = False
+            session.ended_at_utc = datetime.utcnow()
+            session.ended_at_local = datetime.utcnow()
+            session.last_activity_at = datetime.utcnow()
+            session.last_activity_utc = datetime.utcnow()
+            
+            db.commit()
+            return True
+            
+        return False
         
-        chat_session.version += 1
-        db.commit()
-
-        save_message(
-            db, chat_session,
-            "An agent has been notified and will review your request.",
-            "system",
-        )
-        logger.info(f"Relational link finalized: session {session_id} -> lead {lead_id}")
-        return True
-    return False
-
-
-
+    except Exception as e:
+        logger.error(f"Error closing session: {e}")
+        return False
