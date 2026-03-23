@@ -119,7 +119,7 @@ Our team will assist you quickly."""
         if not intent_response:
             fallback_map = {
                 "GREETING": "Hello! I'm your GTT Trade Assistant. How can I help you explore global trade today?",
-                "IMPORT_EXPORT": "We provide comprehensive data for both Import and Export. Which one are you focused on currently?",
+                "IMPORT_EXPORT": "We provide comprehensive data for both Import and Export. Which one country are you looking for?",
                 "BUYER_SEARCH": "We have detailed records of 20M+ buyers across 80+ countries. Are you looking for buyers for a specific product?",
                 "SUPPLIER_SEARCH": "Our database includes millions of verified global suppliers. Looking for a supplier in a specific region?",
                 "HS_CODE_SEARCH": "I can help you find HS Codes and tariff details for any product. What are you looking for?",
