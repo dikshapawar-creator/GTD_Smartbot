@@ -1,3 +1,4 @@
+import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
@@ -9,6 +10,8 @@ from app.models.chat_session import ChatSession, SessionStatus, ConversationMode
 from app.models.chat_message import ChatMessage
 from app.api.deps import get_current_user
 from app.core.timezone_utils import format_ist_datetime
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/live-chat", tags=["live-chat"])
 
@@ -575,11 +578,9 @@ def consolidate_visitor_sessions(db: Session, visitor_uuid: str) -> Optional[Cha
     This prevents duplicate queue cards in the live chat dashboard.
     """
     from sqlalchemy import select
-    from datetime import datetime, timedelta
+    from datetime import datetime
     
-    # Look for active sessions for this visitor in the last 30 minutes
-    cutoff = datetime.utcnow() - timedelta(minutes=30)
-    
+    # Look for ALL active sessions for this visitor (no time cutoff to ensure cleanup)
     stmt = (
         select(ChatSession)
         .where(
@@ -599,6 +600,8 @@ def consolidate_visitor_sessions(db: Session, visitor_uuid: str) -> Optional[Cha
     if len(sessions) > 1:
         keep_session = sessions[0]  # Most recent
         duplicate_sessions = sessions[1:]  # Older duplicates
+        
+        logger.info(f"Consolidating sessions for visitor {visitor_uuid}. Keeping {keep_session.session_id}, closing {len(duplicate_sessions)} others.")
         
         for duplicate in duplicate_sessions:
             duplicate.session_status = SessionStatus.CLOSED

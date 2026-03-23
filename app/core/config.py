@@ -40,6 +40,16 @@ class Settings(BaseSettings):
     # Add client site domains to .env as CORS_ORIGIN_REGEX to avoid code redeployment
     CORS_ORIGIN_REGEX: str = r"https://gtt-smartbot-frontend-.*\.vercel\.app"
 
+    # SMTP Configuration
+    SMTP_HOST: str = "smtp.gmail.com"
+    SMTP_PORT: int = 587
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM_EMAIL: str = ""
+    SMTP_FROM_NAME: str = "GTD Service"
+    SMTP_USE_TLS: bool = True
+    SMTP_USE_SSL: bool = False
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

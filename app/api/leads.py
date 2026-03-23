@@ -1,6 +1,6 @@
 
 import logging
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from typing import List, Optional
@@ -16,6 +16,7 @@ from app.models.lead import Lead, LeadStatusHistory, LeadStatus
 from app.models.chat_session import ChatSession, SessionStatus, ConversationMode
 from app.models.chat_message import ChatMessage
 from app.core.utils import is_valid_uuid
+from app.services.email_service import send_confirmation_email
 
 from app.schemas.chatbot import (
     LeadResponse, 
@@ -43,6 +44,7 @@ router = APIRouter(prefix="/leads", tags=["Leads Admin"])
 async def submit_lead(
     request: Request,
     lead_req: LeadSubmitRequest,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
 ):
     """
@@ -202,6 +204,15 @@ async def submit_lead(
             logger.info(f"Updated session {chat_session.session_id} with lead {lead.id}")
         else:
             logger.warning("No session_id cookie found during lead submission")
+
+        # 4. 🔥 CONFIRMATION EMAIL: Send in background
+        background_tasks.add_task(
+            send_confirmation_email,
+            recipient_email=lead.email,
+            name=lead.name,
+            product=lead.product,
+            country=lead.country_interested
+        )
 
         return {
             "success": True,

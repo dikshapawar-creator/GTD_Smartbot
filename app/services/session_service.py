@@ -139,6 +139,7 @@ class SessionService:
         1. Marked ACTIVE in DB
         2. AND Not deleted
         3. AND (Connected via WebSocket OR Active within the last hour)
+        4. AND Deduplicated by visitor_uuid (only most recent)
         """
         from datetime import datetime, timedelta
         from app.services.websocket_manager import manager
@@ -156,14 +157,20 @@ class SessionService:
             
         sessions = query.order_by(ChatSession.last_activity_at.desc()).all()
         
-        # Filter for online or recent activity
+        # Filter for online or recent activity AND deduplicate by visitor_uuid
+        seen_visitors = set()
         filtered_sessions = []
+        
         for s in sessions:
+            if s.visitor_uuid in seen_visitors:
+                continue
+                
             is_online = manager.has_client(s.visitor_uuid)
             is_recent = s.last_activity_at >= stale_cutoff if s.last_activity_at else False
             
             if is_online or is_recent:
                 filtered_sessions.append(s)
+                seen_visitors.add(s.visitor_uuid)
                 
         return filtered_sessions
 
