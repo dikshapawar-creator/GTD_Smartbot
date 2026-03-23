@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 from app.services.chatbot import ChatbotService
 from app.services import session_service, intent_service, greeting_handler, lead_service
 from app.core import utils
-from app.services.intent_service import IntentType
 from app.models.lead import Lead, LeadStatus
 from app.models.intent_config import IntentConfig
 from app.schemas.chatbot import (
@@ -289,8 +288,7 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
     db.commit()
 
     # ⏰ INACTIVITY: Monitor for 60s
-    now_aware = datetime.now(timezone.utc)
-    background_tasks.add_task(send_inactivity_message, str(active_session.visitor_uuid), now_aware)
+    background_tasks.add_task(send_inactivity_message, str(active_session.visitor_uuid), active_session.last_activity_utc)
     
     # Analytics: Spam Detection
     from app.services.spam_service import check_message_spam
@@ -321,15 +319,16 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
         # Placeholder for smart sales alert
         print(f"🔥 HOT LEAD DETECTED: Session {active_session.session_id}")
 
-    intent = intent_service.detect_intent(db, translated_message)
+    intent_key = intent_service.detect_intent(db, translated_message)
     current_state = active_session.chat_state
     bot_msg = ""
     
     # Check for Human/Representative request first (Priority 1)
-    if intent == IntentType.HANDOFF:
+    if intent_key == "HANDOFF":
         bot_msg = (
-            "No problem.\n\n"
-            "Please wait while I connect you with our expert."
+            "Thank you. We will arrange a call for you shortly.\n\n"
+            "You can discuss all your questions with our team during the meeting.\n\n"
+            "Regarding your data and requirements, our team will provide you with the appropriate solution."
         )
         active_session.chat_state = ChatState.HANDOFF_SENT.value
         db.commit()
@@ -486,7 +485,7 @@ async def get_chat_history(request: Request, db: Session = Depends(get_db)):
             )
             .order_by(ChatMessage.created_at_utc.desc())
             .limit(50)
-            .all()
+            .all()                                                              
         )
         messages.reverse()
     else:

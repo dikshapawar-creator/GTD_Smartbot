@@ -239,14 +239,14 @@ class LeadSubmitRequest(BaseModel):
 
     @model_validator(mode='after')
     def validate_enterprise_rules(self) -> 'LeadSubmitRequest':
-        # 1. Personal Email -> Website Required
-        personal_domains = [
-            'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 
-            'icloud.com', 'protonmail.com', 'aol.com', 'zoho.com', 'mail.com'
-        ]
-        domain = self.business_email.split('@')[1].lower()
-        if domain in personal_domains and not self.website:
-            raise ValueError("Website is required for verification when using a personal email.")
+        # 1. Personal Email -> Website Required (RELAXED: No longer mandatory)
+        # personal_domains = [
+        #     'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 
+        #     'icloud.com', 'protonmail.com', 'aol.com', 'zoho.com', 'mail.com'
+        # ]
+        # domain = self.business_email.split('@')[1].lower()
+        # if domain in personal_domains and not self.website:
+        #     raise ValueError("Website is required for verification when using a personal email.")
 
         # 2. Phone Length Validation
         # We check common country lengths if the prefix matches

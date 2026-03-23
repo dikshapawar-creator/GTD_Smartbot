@@ -111,8 +111,7 @@ async def websocket_chat(
             await manager.connect_client(session_id, websocket)
             
             # ⏰ INACTIVITY: Start monitor on connection
-            now_aware = datetime.now(timezone.utc)
-            asyncio.create_task(send_inactivity_message(session_id, now_aware))
+            asyncio.create_task(send_inactivity_message(session_id, chat_session.last_activity_utc))
 
         elif role == "agent":
             # ── Secure JWT Validation for Agent ──

@@ -103,47 +103,63 @@ Our team will assist you quickly."""
                 "intent": "urgent"
             }
 
-        # C. Intent Detection
-        intent = detect_intent(db, user_message)
-        logger.info(f"Detected intent: {intent.value} for session {session_id}")
+        # C. Intent Detection (Dynamic)
+        intent_key = detect_intent(db, user_message)
+        logger.info(f"Detected intent: {intent_key} for session {session_id}")
 
         intent_response = None
         
         # Check for specialized intent in DB first
         from app.models.intent_config import IntentConfig
-        config = db.query(IntentConfig).filter(IntentConfig.intent_key == intent.value).first()
+        config = db.query(IntentConfig).filter(IntentConfig.intent_key == intent_key).first()
         if config and config.response_text:
             intent_response = config.response_text
         
         # Hardcoded High-Value Fallbacks (if DB is empty)
         if not intent_response:
             fallback_map = {
-                IntentType.GREETING: "Hello! I'm your GTT Trade Assistant. How can I help you explore global trade today?",
-                IntentType.IMPORT_EXPORT: "We provide comprehensive data for both Import and Export. Which one are you focused on currently?",
-                IntentType.BUYER_SEARCH: "We have detailed records of 20M+ buyers across 80+ countries. Are you looking for buyers for a specific product?",
-                IntentType.SUPPLIER_SEARCH: "Our database includes millions of verified global suppliers. Looking for a supplier in a specific region?",
-                IntentType.HS_CODE_SEARCH: "I can help you find HS Codes and tariff details for any product. What are you looking for?",
-                IntentType.COMPETITOR_ANALYSIS: "Want to track what your competitors are shipping? We provide real-time competitor intelligence.",
-                IntentType.SHIPMENT_RECORDS: "We provide detailed bill of lading and manifest data for 80+ countries. Want to see a sample?",
-                IntentType.COUNTRY_TRADE_ANALYSIS: "We have in-depth trade reports for almost every country. Which region interests you?",
-                IntentType.PRODUCT_MARKET_RESEARCH: "Get insights into global demand and supply trends for your products. Tell me the product name!",
-                IntentType.PRICING_INQUIRY: "We have flexible plans for every business size. Please use the demo form below to discuss the best pricing for your needs.",
-                IntentType.REQUEST_DEMO: THANK_YOU_MESSAGE,
-                IntentType.LEAD_COLLECTION: THANK_YOU_MESSAGE,
-                IntentType.SALES_DEMO: THANK_YOU_MESSAGE,
-                IntentType.DEMO: THANK_YOU_MESSAGE,
-                IntentType.HANDOFF: "I'll connect you with an expert. In the meantime, feel free to book a demo for a priority consultation.",
-                IntentType.DATA_PROVIDER_DATASOURCE: "We collaborate with data providers who can supply import-export or customs trade data.\nIf you are interested in selling or साझेदारी, please share your company details and type of data you can provide.",
-                IntentType.API_ACCESS_REQUEST: "We offer API access for seamless integration of trade data into your system.\nPlease share your use case and technical requirements, and our team will assist you with API details and access."
+                "GREETING": "Hello! I'm your GTT Trade Assistant. How can I help you explore global trade today?",
+                "IMPORT_EXPORT": "We provide comprehensive data for both Import and Export. Which one are you focused on currently?",
+                "BUYER_SEARCH": "We have detailed records of 20M+ buyers across 80+ countries. Are you looking for buyers for a specific product?",
+                "SUPPLIER_SEARCH": "Our database includes millions of verified global suppliers. Looking for a supplier in a specific region?",
+                "HS_CODE_SEARCH": "I can help you find HS Codes and tariff details for any product. What are you looking for?",
+                "COMPETITOR_ANALYSIS": "Want to track what your competitors are shipping? We provide real-time competitor intelligence.",
+                "SHIPMENT_RECORDS": "We provide detailed bill of lading and manifest data for 80+ countries. Want to see a sample?",
+                "COUNTRY_TRADE_ANALYSIS": "We have in-depth trade reports for almost every country. Which region interests you?",
+                "PRODUCT_MARKET_RESEARCH": "Get insights into global demand and supply trends for your products. Tell me the product name!",
+                "PRICING_INQUIRY": "We have flexible plans for every business size. Please use the demo form below to discuss the best pricing for your needs.",
+                "REQUEST_DEMO": THANK_YOU_MESSAGE,
+                "LEAD_COLLECTION": THANK_YOU_MESSAGE,
+                "SALES_DEMO": THANK_YOU_MESSAGE,
+                "DEMO": THANK_YOU_MESSAGE,
+                "HANDOFF": "I'll connect you with an expert. In the meantime, feel free to book a demo for a priority consultation.",
+                "DATA_PROVIDER_DATASOURCE": "We collaborate with data providers who can supply import-export or customs trade data.\nIf you are interested in selling or साझेदारी, please share your company details and type of data you can provide.",
+                "API_ACCESS_REQUEST": "We offer API access for seamless integration of trade data into your system.\nPlease share your use case and technical requirements, and our team will assist you with API details and access."
             }
-            intent_response = fallback_map.get(intent)
+            intent_response = fallback_map.get(intent_key)
 
-        if intent_response and intent != IntentType.UNKNOWN:
+        if intent_response and intent_key != "UNKNOWN":
+            logger.info(f"Intent response found (Source: {'DB' if config else 'Hardcoded'}): {intent_key}")
             # Intent found -> Reset fallback sentinel if it was set
             
-            # 🔧 FIX: Map GREETING intent to START state to match Enum
-            new_state = intent.value
-            if intent == IntentType.GREETING:
+            # 🔧 FIX: Map specific informative intents to valid ChatStates
+            new_state = chat_session.chat_state or ChatState.START.value
+            
+            if intent_key == "GREETING":
+                new_state = ChatState.START.value
+            elif intent_key in [
+                "DEMO", "REQUEST_DEMO", "SALES_DEMO", 
+                "LEAD_COLLECTION", "PRICING_INQUIRY"
+            ]:
+                new_state = ChatState.COMPLETE.value
+            elif intent_key == "HANDOFF":
+                new_state = ChatState.HANDOFF_SENT.value
+            
+            # Ensure new_state is a string and valid (fallback to START if unknown)
+            try:
+                # Validate if it's one of the ChatState enum values
+                ChatState(new_state)
+            except ValueError:
                 new_state = ChatState.START.value
                 
             session_service.update_chat_state(db, chat_session, new_state)
@@ -161,8 +177,10 @@ Our team will assist you quickly."""
                     {"label": "Book Demo", "action": "OPEN_LEAD_FORM", "icon": "🚀", "type": "secondary"},
                     {"label": "Connect with Data Expert", "action": "HANDOFF", "icon": "💬", "type": "secondary"}
                 ],
-                "intent": intent.value
+                "intent": intent_key
             }
+
+        logger.warning(f"No specific intent response found for intent_key: {intent_key}. Falling back to general logic.")
 
         # D. NO INTENT FOUND -> FALLBACK LOGIC (Loop Prevention)
         last_state = chat_session.chat_state
