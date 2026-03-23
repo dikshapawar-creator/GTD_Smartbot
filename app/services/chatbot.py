@@ -11,113 +11,184 @@ from app.schemas.chatbot import ChatState
 from app.models.lead import Lead
 from app.models.chat_session import ChatSession
 from app.services import session_service
+from app.services.intent_service import detect_intent, IntentType
 
 logger = logging.getLogger(__name__)
 
+THANK_YOU_MESSAGE = """Thank you. We will arrange a call for you shortly.
+
+You can discuss all your questions with our team during the meeting.
+
+Regarding your data and requirements, our team will provide you with the appropriate solution."""
+
 STATE_QUESTIONS = {
     ChatState.START: "Welcome! Are you interested in Import or Export?",
-    ChatState.TRADE_TYPE: "Which country are you interested in?",
-    ChatState.COUNTRY: "What product are you dealing with?",
+    ChatState.TRADE_TYPE: "To provide you with the most accurate trade data for your region, please Book a Demo with our experts.",
+    ChatState.COUNTRY: "Our database covers 80+ countries. Please use the form below to select your target market and get started.",
     ChatState.PRODUCT: "Great choice! To get detailed insights on this product, please Book a Demo with our experts.",
-    ChatState.NAME: "What is your email address?",
-    ChatState.EMAIL: "Which company do you represent?",
-    ChatState.COMPANY: "What is your contact phone number?",
-    ChatState.PHONE: "Finally, what are your specific requirements?",
-    ChatState.REQUIREMENT: "Thank you! Our team will contact you soon.",
     ChatState.COMPLETE: "Is there anything else I can help you with?",
-    ChatState.ENDED: "Thank you for reaching out to us. Have a great day!"
+    ChatState.ENDED: THANK_YOU_MESSAGE
 }
 
 class ChatbotService:
     @staticmethod
+    def _clean_bot_response(text: str) -> str:
+        """
+        Enterprise-grade response cleanser. 
+        Detects and removes conversational lead-gathering phrases (PII requests)
+        and replaces them with a nudge to use the formal Lead Form/CTA.
+        """
+        import re
+        if not text:
+            return ""
+            
+        # Target phrases like "Please share your email", "Provide your name", etc.
+        patterns = [
+            r"please (?:share|provide|tell me|give me|send me) your (?:name|email|phone|contact|company|website|business email|full name)[^.!?]*[.!?]?",
+            r"(?:share|provide|tell me|give me|send me) your (?:name|email|phone|contact|company|website|business email|full name)[^.!?]*[.!?]?",
+            r"which company do you (?:represent|work for)[^.!?]*[.!?]?",
+            r"what is your (?:email|phone|contact|company|website)[^.!?]*[.!?]?",
+            r"finally, what are your specific requirements [^.!?]*[.!?]?"
+        ]
+        
+        cleaned = text
+        for pattern in patterns:
+            cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+            
+        # Add the Book Demo nudge if we stripped something out
+        if cleaned.strip() != text.strip():
+            nudge = " Please click on \"Book Demo\" and our team will get in touch with you."
+            if nudge not in cleaned:
+                cleaned = cleaned.strip() + nudge
+                
+        return cleaned.strip()
+
+    @staticmethod
+    def check_urgent(message: str) -> bool:
+        """
+        Checks for urgent keywords in the user message.
+        """
+        urgent_keywords = ["urgent", "asap", "immediately", "now", "fast", "quick", "need help", "need assistance","urgent requirement","I want today","I want now"]
+        msg_lower = message.lower()
+        return any(word in msg_lower for word in urgent_keywords)
+
+    @staticmethod
     def handle_message(db: Session, chat_session: ChatSession, user_message: str) -> Dict[str, Any]:
         """
-        Handles a message using the provided DB session object.
-        Replaces lead logic while keeping backward compatibility with the 'leads' table.
+        Handles a message with Simplified Bot Flow:
+        1. Check Urgent (WhatsApp redirect)
+        2. Intent Match (from DB or fallbacks)
+        3. Simple Fallback with Loop Prevention
         """
-        current_state = chat_session.chat_state
         session_id = chat_session.session_id
 
-        # 1. Save user message to persistent SQL messages table
+        # A. Save user message
         session_service.save_message(db, chat_session, user_message, "user")
 
-        # 2. Backward compatibility: Find or create lead tied to this session
-        lead = None
-        if chat_session.lead_id:
-             lead = db.query(Lead).filter(Lead.id == chat_session.lead_id).first()
-             
-        if not lead:
-             # If no lead exists for this session yet, create one
-             # 🚨 SECURITY: Provide default values for required B2B fields to avoid SQL IntegrityError
-             placeholder_email = f"pending_{chat_session.session_id}@gtdservice.local"
-             lead = Lead(
-                 name="Visitor",
-                 email=placeholder_email, # email is required in model
-                 phone="Pending",
-                 company="Pending",
-                 status="IN_PROGRESS",
-                 source="chatbot",
-                 tenant_id=chat_session.tenant_id
-             )
-             db.add(lead)
-             db.flush() # Get the ID
-             chat_session.lead_id = str(lead.id)
-             db.commit()
+        # B. Urgent Keyword Handling (TOP PRIORITY)
+        if ChatbotService.check_urgent(user_message):
+            urgent_msg = """We understand your request is urgent.
 
-        # 3. Process State Machine
-        next_state = current_state
-        bot_response = ""
-        
-        if current_state == ChatState.START:
-             # Handle the initial response to "Import or Export?"
-             lead.trade_type = user_message
-             next_state = ChatState.TRADE_TYPE
-             bot_response = STATE_QUESTIONS[ChatState.TRADE_TYPE] # "Which country..."
-             
-        elif current_state == ChatState.TRADE_TYPE:
-            lead.country_interested = user_message
-            next_state = ChatState.COUNTRY
-            bot_response = STATE_QUESTIONS[ChatState.COUNTRY] # "What product..."
-            
-        elif current_state == ChatState.COUNTRY:
-            lead.product = user_message
-            # STOP asking for Name/Email/Phone. 
-            # Redirect to CTA.
-            next_state = ChatState.COMPLETE
-            bot_response = STATE_QUESTIONS[ChatState.PRODUCT] # "Great choice! To get detailed insights..."
+For immediate assistance, please contact us on WhatsApp:
+💬 https://wa.me/918527376675
+📞 +91 8527376675
 
-        elif current_state == ChatState.COMPLETE:
-            # They replied after the CTA — acknowledge and end gracefully
-            next_state = ChatState.ENDED
-            bot_response = "Thank you! Our team will reach out to you shortly. Have a wonderful day! 🎉"
-
-        elif current_state == ChatState.ENDED:
-            # Session is truly done — don't respond again
-            next_state = ChatState.ENDED
-            bot_response = ""  # Silence — session is over
-
-        else:
-            # Unexpected state — recover with a CTA nudge
-            next_state = ChatState.COMPLETE
-            bot_response = "I'd be happy to help! You can book a demo with our experts for a personalized walkthrough."
-
-        # 4. Update state in DB session row
-        session_service.update_chat_state(db, chat_session, next_state)
-        
-        # 5. Save bot response
-        session_service.save_message(db, chat_session, bot_response, "bot")
-
-        # 6. Return response with CTA if we reached the CTA point
-        if next_state == ChatState.COMPLETE and current_state == ChatState.COUNTRY:
-             return {
-                "message": bot_response,
-                "state": next_state,
-                "type": "CTA",
-                "cta_label": "Book Demo",
-                "action": "OPEN_LEAD_FORM"
+Our team will assist you quickly."""
+            session_service.save_message(db, chat_session, urgent_msg, "bot")
+            session_service.update_chat_state(db, chat_session, ChatState.COMPLETE)
+            return {
+                "message": urgent_msg,
+                "state": ChatState.COMPLETE,
+                "type": "MESSAGE",
+                "intent": "urgent"
             }
 
+        # C. Intent Detection
+        intent = detect_intent(db, user_message)
+        logger.info(f"Detected intent: {intent.value} for session {session_id}")
+
+        intent_response = None
+        
+        # Check for specialized intent in DB first
+        from app.models.intent_config import IntentConfig
+        config = db.query(IntentConfig).filter(IntentConfig.intent_key == intent.value).first()
+        if config and config.response_text:
+            intent_response = config.response_text
+        
+        # Hardcoded High-Value Fallbacks (if DB is empty)
+        if not intent_response:
+            fallback_map = {
+                IntentType.GREETING: "Hello! I'm your GTT Trade Assistant. How can I help you explore global trade today?",
+                IntentType.IMPORT_EXPORT: "We provide comprehensive data for both Import and Export. Which one are you focused on currently?",
+                IntentType.BUYER_SEARCH: "We have detailed records of 20M+ buyers across 80+ countries. Are you looking for buyers for a specific product?",
+                IntentType.SUPPLIER_SEARCH: "Our database includes millions of verified global suppliers. Looking for a supplier in a specific region?",
+                IntentType.HS_CODE_SEARCH: "I can help you find HS Codes and tariff details for any product. What are you looking for?",
+                IntentType.COMPETITOR_ANALYSIS: "Want to track what your competitors are shipping? We provide real-time competitor intelligence.",
+                IntentType.SHIPMENT_RECORDS: "We provide detailed bill of lading and manifest data for 80+ countries. Want to see a sample?",
+                IntentType.COUNTRY_TRADE_ANALYSIS: "We have in-depth trade reports for almost every country. Which region interests you?",
+                IntentType.PRODUCT_MARKET_RESEARCH: "Get insights into global demand and supply trends for your products. Tell me the product name!",
+                IntentType.PRICING_INQUIRY: "We have flexible plans for every business size. Please use the demo form below to discuss the best pricing for your needs.",
+                IntentType.REQUEST_DEMO: THANK_YOU_MESSAGE,
+                IntentType.LEAD_COLLECTION: THANK_YOU_MESSAGE,
+                IntentType.SALES_DEMO: THANK_YOU_MESSAGE,
+                IntentType.DEMO: THANK_YOU_MESSAGE,
+                IntentType.HANDOFF: "I'll connect you with an expert. In the meantime, feel free to book a demo for a priority consultation.",
+                IntentType.DATA_PROVIDER_DATASOURCE: "We collaborate with data providers who can supply import-export or customs trade data.\nIf you are interested in selling or साझेदारी, please share your company details and type of data you can provide.",
+                IntentType.API_ACCESS_REQUEST: "We offer API access for seamless integration of trade data into your system.\nPlease share your use case and technical requirements, and our team will assist you with API details and access."
+            }
+            intent_response = fallback_map.get(intent)
+
+        if intent_response and intent != IntentType.UNKNOWN:
+            # Intent found -> Reset fallback sentinel if it was set
+            
+            # 🔧 FIX: Map GREETING intent to START state to match Enum
+            new_state = intent.value
+            if intent == IntentType.GREETING:
+                new_state = ChatState.START.value
+                
+            session_service.update_chat_state(db, chat_session, new_state)
+            
+            # CLEANSE: Remove PII requests
+            intent_response = ChatbotService._clean_bot_response(intent_response)
+            session_service.save_message(db, chat_session, intent_response, "bot")
+            
+            # Use Multi-CTA for every intent response for consistency
+            return {
+                "message": intent_response,
+                "state": str(chat_session.chat_state).upper(),
+                "type": "CTA",
+                "ctas": [
+                    {"label": "Book Demo", "action": "OPEN_LEAD_FORM", "icon": "🚀", "type": "secondary"},
+                    {"label": "Connect with Data Expert", "action": "HANDOFF", "icon": "💬", "type": "secondary"}
+                ],
+                "intent": intent.value
+            }
+
+        # D. NO INTENT FOUND -> FALLBACK LOGIC (Loop Prevention)
+        last_state = chat_session.chat_state
+        
+        if last_state == ChatState.FALLBACK:
+            # Repeated fallback -> Short silence message
+            repeat_msg = "Our team will connect with you shortly."
+            session_service.save_message(db, chat_session, repeat_msg, "bot")
+            return {
+                "message": repeat_msg,
+                "state": ChatState.FALLBACK.value,
+                "type": "MESSAGE"
+            }
+        
+        # First fallback -> Standardized message
+        fallback_msg = THANK_YOU_MESSAGE
+        
+        session_service.update_chat_state(db, chat_session, ChatState.FALLBACK.value)
+        session_service.save_message(db, chat_session, fallback_msg, "bot")
+        
         return {
-            "message": bot_response if bot_response else STATE_QUESTIONS.get(next_state, "How can I help you?"),
-            "state": next_state
+            "message": fallback_msg,
+            "state": ChatState.FALLBACK.value,
+            "type": "CTA",
+            "ctas": [
+                {"label": "Book Demo", "action": "OPEN_LEAD_FORM", "icon": "🚀", "type": "secondary"},
+                {"label": "Connect with Data Expert", "action": "HANDOFF", "icon": "💬", "type": "secondary"}
+            ]
         }

@@ -42,10 +42,18 @@ class ChatState(str, Enum):
     COMPLETE = "COMPLETE"
     ENDED = "ENDED"
     HANDOFF_SENT = "HANDOFF_SENT"
+    FALLBACK = "FALLBACK"
 
 class ResponseType(str, Enum):
     MESSAGE = "MESSAGE"
     CTA = "CTA"
+    FORM = "FORM"
+
+class CTAObject(BaseModel):
+    label: str
+    action: str
+    icon: Optional[str] = None
+    type: Optional[str] = "primary" # primary | secondary | outline
 
 class SessionInitRequest(BaseModel):
     visitor_uuid: Optional[str] = None
@@ -59,6 +67,7 @@ class SessionInitResponse(BaseModel):
     type: Optional[ResponseType] = ResponseType.MESSAGE
     cta_label: Optional[str] = None
     action: Optional[str] = None
+    ctas: Optional[List[CTAObject]] = None # 🔥 Multi-CTA Support
     conversation_status: Optional[str] = "BOT"
     server_time_utc: datetime = Field(default_factory=lambda: datetime.now(dt_timezone.utc))
 
@@ -75,6 +84,7 @@ class ChatMessageResponse(BaseModel):
     type: ResponseType = ResponseType.MESSAGE
     cta_label: Optional[str] = None
     action: Optional[str] = None
+    ctas: Optional[List[CTAObject]] = None # 🔥 Multi-CTA Support
     intent: Optional[str] = None # For visibility in Swagger/Debug
     role: Optional[str] = None # For frontend history mapping
     has_greeted: Optional[bool] = None

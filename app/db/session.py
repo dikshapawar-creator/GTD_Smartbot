@@ -119,7 +119,6 @@ def init_db():
     try:
         # Import models here to ensure they are registered with Base.metadata
         from app.models.lead import Lead
-        from app.models.conversation import Conversation
         from app.models.chat_session import ChatSession
         from app.models.chat_message import ChatMessage
         from app.models.intent_config import IntentConfig
@@ -168,6 +167,18 @@ def _ensure_tenant_id_columns(engine):
                 except Exception as e:
                     logger.warning(f"Database: Could not create index on leads(tenant_id): {e}")
 
+            # Leads session_id column (Lead <-> Chat linkage)
+            check_session_id = conn.execute(text(
+                "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'leads' AND COLUMN_NAME = 'session_id'"
+            )).fetchone()
+            if not check_session_id:
+                logger.info("Database: Adding session_id to leads...")
+                conn.execute(text("ALTER TABLE leads ADD session_id VARCHAR(36) NULL"))
+                try:
+                    conn.execute(text("CREATE INDEX ix_leads_session_id ON leads(session_id)"))
+                except Exception as e:
+                    logger.warning(f"Database: Could not create index on leads(session_id): {e}")
+
             # Lead status history table
             check_history = conn.execute(text(
                 "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'lead_status_history' AND COLUMN_NAME = 'tenant_id'"
@@ -197,6 +208,28 @@ def _ensure_tenant_id_columns(engine):
             conn.execute(text(f"UPDATE leads SET tenant_id = {settings.DEFAULT_TENANT_ID} WHERE tenant_id IS NULL OR tenant_id != {settings.DEFAULT_TENANT_ID}"))
             conn.execute(text(f"UPDATE lead_status_history SET tenant_id = {settings.DEFAULT_TENANT_ID} WHERE tenant_id IS NULL OR tenant_id != {settings.DEFAULT_TENANT_ID}"))
             
+            # 8. is_lead column for chat_sessions (Lead <-> Chat linkage)
+            check_is_lead = conn.execute(text(
+                "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'chat_sessions' AND COLUMN_NAME = 'is_lead'"
+            )).fetchone()
+            if not check_is_lead:
+                logger.info("Database: Adding is_lead to chat_sessions...")
+                conn.execute(text("ALTER TABLE chat_sessions ADD is_lead BIT NOT NULL DEFAULT 0"))
+
+            # Lead Details columns for chat_sessions
+            for col, col_type in [
+                ("lead_name", "NVARCHAR(255)"),
+                ("lead_email", "NVARCHAR(255)"),
+                ("lead_phone", "NVARCHAR(50)"),
+                ("lead_company", "NVARCHAR(255)")
+            ]:
+                check_col = conn.execute(text(
+                    f"SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'chat_sessions' AND COLUMN_NAME = '{col}'"
+                )).fetchone()
+                if not check_col:
+                    logger.info(f"Database: Adding {col} to chat_sessions...")
+                    conn.execute(text(f"ALTER TABLE chat_sessions ADD {col} {col_type} NULL"))
+
             # 6. Global Re-login (Force users to get new tenant IDs and stable secrets)
             # Only run this once relative to this fix (we can use a specific check if needed, 
             # but usually incrementing once is safe in this dev transition)

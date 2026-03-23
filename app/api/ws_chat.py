@@ -8,6 +8,7 @@ Enterprise hardened:
 """
 import logging
 import json
+import asyncio
 from datetime import datetime, timezone
 from typing import Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
@@ -21,6 +22,7 @@ from app.models.chat_session import ChatSession, SessionStatus, ConversationMode
 from app.models.chat_message import ChatMessage
 from app.models.auth import User
 from app.services.websocket_manager import manager
+from app.services.inactivity_service import send_inactivity_message
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +109,10 @@ async def websocket_chat(
             
             user_tenant_id = chat_session.tenant_id
             await manager.connect_client(session_id, websocket)
+            
+            # ⏰ INACTIVITY: Start monitor on connection
+            now_aware = datetime.now(timezone.utc)
+            asyncio.create_task(send_inactivity_message(session_id, now_aware))
 
         elif role == "agent":
             # ── Secure JWT Validation for Agent ──
@@ -213,7 +219,11 @@ async def websocket_chat(
                     continue
 
                 if role == "client":
+                    # 🔥 PERSISTENCE: Save user message
                     _save_ws_message(db, session_id, text, "user", user_tenant_id)
+                    
+                    # ⏰ INACTIVITY: Monitor
+                    asyncio.create_task(send_inactivity_message(session_id, datetime.now(timezone.utc)))
                     
                     # 🔥 Broadcast to CRM Dashboard
                     from app.core.socket_manager import socket_manager

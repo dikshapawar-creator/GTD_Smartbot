@@ -14,44 +14,9 @@ router = APIRouter(prefix="/live-chat", tags=["live-chat"])
 
 def get_active_sessions_sync(db: Session) -> List[ChatSession]:
     """Get all active sessions for the live chat dashboard (synchronous version)."""
-    from sqlalchemy import select, and_, or_
-    from datetime import datetime, timedelta
-    
-    # Define stale cutoff (1 hour of inactivity)
-    stale_cutoff = datetime.utcnow() - timedelta(hours=1)
-    
-    # We want sessions that are:
-    # 1. ACTIVE or BOT status
-    # 2. AND NOT deleted
-    # 3. AND (Connected via WS OR Active in the last 1 hour)
-    
-    # First, get all potentially active sessions from DB
-    stmt = (
-        select(ChatSession)
-        .where(
-            and_(
-                ChatSession.session_status == SessionStatus.ACTIVE,
-                ChatSession.is_deleted == False
-            )
-        )
-        .order_by(ChatSession.last_activity_at.desc())
-    )
-    
-    result = db.execute(stmt)
-    sessions = list(result.scalars().all())
-    
-    # Filter for online or recent activity
-    from app.services.websocket_manager import manager
-    
-    filtered_sessions = []
-    for s in sessions:
-        is_online = manager.has_client(s.visitor_uuid)
-        is_recent = s.last_activity_at >= stale_cutoff if s.last_activity_at else False
-        
-        if is_online or is_recent:
-            filtered_sessions.append(s)
-            
-    return filtered_sessions
+    from app.services.session_service import SessionService
+    session_service = SessionService(db)
+    return session_service.get_active_sessions()
 
 
 @router.get("/conversations")
@@ -509,10 +474,10 @@ def format_session_for_crm(session: ChatSession) -> dict:
         "agent_name": session.agent_name,
         "is_locked": session.is_locked,
         "is_online": manager.has_client(session.visitor_uuid),
-        "lead_name": session.lead_name or f"Visitor #{session.visitor_uuid[-6:].upper()}",
-        "lead_company": session.lead_company,
-        "lead_email": session.lead_email,
-        "lead_phone": session.lead_phone,
+        "lead_name": getattr(session.lead, 'name', None) or session.lead_name or f"Visitor #{session.visitor_uuid[-6:].upper()}",
+        "lead_company": getattr(session.lead, 'company', None) or session.lead_company,
+        "lead_email": getattr(session.lead, 'email', None) or session.lead_email,
+        "lead_phone": getattr(session.lead, 'phone', None) or session.lead_phone,
         "lead_score": session.lead_score or 0,
         "lead_status": _get_lead_status(session.lead_score or 0),
         "spam_flag": session.spam_flag or False,
@@ -531,6 +496,7 @@ def format_session_for_crm(session: ChatSession) -> dict:
         "language": session.language or "en",
         "created_at_ist": format_ist_datetime(session.created_at),
         "last_message_ist": format_ist_datetime(session.last_activity_at),
+        "lead_insights": session.lead_insights,
         "server_time_utc": datetime.utcnow().isoformat(),
     }
 
@@ -745,6 +711,52 @@ async def get_session_detail(
     
     logger.info(f"Found session: {session.session_id}, visitor_uuid: {session.visitor_uuid}")
     return format_session_for_crm(session)
+
+
+@router.post("/update-lead/{session_uuid}")
+async def update_lead(
+    session_uuid: str,
+    data: Dict[str, Any],
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Manually update lead data for a session from CRM."""
+    from sqlalchemy import select, or_
+    stmt = select(ChatSession).where(
+        (ChatSession.visitor_uuid == session_uuid) | (ChatSession.session_id == session_uuid)
+    )
+    result = db.execute(stmt)
+    session = result.scalars().first()
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    # Update session lead fields directly
+    if "name" in data: session.lead_name = data["name"]
+    if "email" in data: session.lead_email = data["email"]
+    if "phone" in data: session.lead_phone = data["phone"]
+    if "company" in data: session.lead_company = data["company"]
+    
+    # Also update the linked Lead record if it exists
+    if session.lead:
+        if "name" in data: session.lead.name = data["name"]
+        if "email" in data: session.lead.email = data["email"]
+        if "phone" in data: session.lead.phone = data["phone"]
+        if "company" in data: session.lead.company = data["company"]
+        session.is_lead = True
+    
+    session.updated_at = datetime.utcnow()
+    db.commit()
+    
+    # Notify via WebSocket to refresh CRM view
+    try:
+        socket_manager = get_live_chat_socket()
+        if socket_manager:
+            await socket_manager.notify_session_updated(session, "default")
+    except Exception:
+        pass
+        
+    return {"status": "success", "message": "Lead updated successfully"}
 
 
 @router.get("/server-time")

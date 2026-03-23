@@ -99,6 +99,7 @@ class ChatSession(Base):
     total_messages = Column(Integer, default=0, nullable=False)
     duration_seconds = Column(Integer, nullable=True)
     is_locked = Column(Boolean, default=False, nullable=False)
+    is_lead = Column(Boolean, default=False, nullable=False)
     agent_joined = Column(Boolean, default=False, nullable=False) # Bot uses this to stop replying
     has_greeted = Column(Boolean, default=False, nullable=False)
     chat_state = Column(String(50), nullable=False, default="START")
@@ -114,6 +115,7 @@ class ChatSession(Base):
     lead_status = Column(String(50), nullable=False, default="Cold")
     spam_flag = Column(Boolean, nullable=False, default=False)
     language = Column(String(50), nullable=True, default="en")
+    lead_insights = Column(Text, nullable=True) # JSON field for scoring breakdown
 
     # Legacy field (kept for migration compatibility) — non-nullable in some DB versions
     status = Column(String(50), nullable=False, default="active")

@@ -9,6 +9,7 @@ from app.models.auth import User, AuditLog
 from app.models.lead import Lead, LeadStatus
 from app.models.chat_session import ChatSession, SessionStatus
 from app.models.chat_message import ChatMessage
+from app.models.blocked import BlockedVisitor
 
 router = APIRouter(prefix="/admin", tags=["Administration (High Privilege)"])
 
@@ -31,11 +32,10 @@ def get_dashboard_stats(
         Lead.is_deleted == False
     ).scalar()
     
-    active_chats = db.query(func.count(ChatSession.id)).filter(
-        ChatSession.tenant_id == tenant_id,
-        ChatSession.session_status == SessionStatus.ACTIVE,
-        ChatSession.is_deleted == False
-    ).scalar()
+    from app.services.session_service import SessionService
+    session_service = SessionService(db)
+    active_sessions = session_service.get_active_sessions(tenant_id=tenant_id)
+    active_chats = len(active_sessions)
 
     total_messages = db.query(func.count(ChatMessage.id)).join(
         ChatSession, ChatSession.session_id == ChatMessage.session_id
@@ -53,6 +53,9 @@ def get_dashboard_stats(
         ChatSession.is_deleted == False
     ).order_by(ChatSession.last_activity_utc.desc()).limit(5).all()
 
+    from app.services.websocket_manager import manager
+    stale_cutoff = datetime.utcnow() - timedelta(hours=1)
+    
     return {
         "kpis": {
             "total_leads": total_leads,
@@ -94,9 +97,106 @@ def get_dashboard_stats(
                 "session_id": s.session_id,
                 "client_ip": s.initial_ip,
                 "country": s.country,
-                "status": s.session_status,
+                "status": "ACTIVE" if (manager.has_client(s.visitor_uuid) or (s.last_activity_at >= stale_cutoff if s.last_activity_at else False)) else "ENDED",
                 "last_activity": s.last_activity_utc.isoformat(),
                 "mode": s.conversation_mode
             } for s in recent_sessions
         ]
     }
+
+# ── Security & IP Management ──────────────────────────────────────────
+
+@router.get("/security/blocked-ips")
+def list_blocked_ips(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(2))
+):
+    """List all manually blocked visitor IPs."""
+    blocked = db.query(BlockedVisitor).filter(
+        BlockedVisitor.tenant_id == current_user.tenant_id
+    ).order_by(BlockedVisitor.blocked_at.desc()).all()
+    
+    return [
+        {
+            "id": b.id,
+            "ip": b.ip_address,
+            "fingerprint": b.visitor_fingerprint,
+            "reason": b.reason,
+            "time": b.blocked_at.isoformat()
+        } for b in blocked
+    ]
+
+@router.post("/security/block-ip")
+def block_visitor_ip(
+    ip_data: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(2))
+):
+    """Manually block a specific IP address."""
+    ip = ip_data.get("ip")
+    if not ip:
+        return {"error": "IP address is required"}
+        
+    # Check if already blocked
+    existing = db.query(BlockedVisitor).filter(
+        BlockedVisitor.tenant_id == current_user.tenant_id,
+        BlockedVisitor.ip_address == ip
+    ).first()
+    
+    if existing:
+        return {"message": "IP already blocked", "id": existing.id}
+        
+    new_block = BlockedVisitor(
+        tenant_id=current_user.tenant_id,
+        ip_address=ip,
+        reason=ip_data.get("reason", "Manual block"),
+        blocked_at=datetime.utcnow()
+    )
+    db.add(new_block)
+    db.commit()
+    db.refresh(new_block)
+    
+    return {"message": "IP blocked successfully", "id": new_block.id}
+
+@router.delete("/security/unblock-ip/{block_id}")
+def unblock_visitor_ip(
+    block_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(2))
+):
+    """Remove an IP block record."""
+    block = db.query(BlockedVisitor).filter(
+        BlockedVisitor.id == block_id,
+        BlockedVisitor.tenant_id == current_user.tenant_id
+    ).first()
+    
+    if not block:
+        return {"error": "Block record not found"}
+        
+    db.delete(block)
+    db.commit()
+    return {"message": "IP unblocked successfully"}
+
+@router.patch("/security/block-ip/{block_id}")
+def update_block_reason(
+    block_id: int,
+    data: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(2))
+):
+    """Update the reason for a blocked IP."""
+    block = db.query(BlockedVisitor).filter(
+        BlockedVisitor.id == block_id,
+        BlockedVisitor.tenant_id == current_user.tenant_id
+    ).first()
+    
+    if not block:
+        return {"error": "Block record not found"}
+        
+    reason = data.get("reason")
+    if reason:
+        block.reason = reason
+        db.commit()
+        db.refresh(block)
+        
+    return {"message": "Reason updated successfully", "reason": block.reason}

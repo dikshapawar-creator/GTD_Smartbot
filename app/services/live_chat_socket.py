@@ -17,7 +17,7 @@ class LiveChatSocketManager:
         ip_meta = session.ip_metadata_dict
         
         session_data = {
-            "type": "visitor_joined",
+            "type": "VISITOR_JOINED",
             "session_id": session.session_id,
             "visitor_uuid": session.visitor_uuid,
             "session_status": session.session_status,
@@ -44,6 +44,7 @@ class LiveChatSocketManager:
             "device_type": ip_meta.get("device_type") or session.device_type or "desktop",
             "created_at_ist": format_ist_datetime(session.created_at),
             "last_message_ist": format_ist_datetime(session.last_activity_at),
+            "lead_insights": getattr(session, 'lead_insights', None),
         }
         
         # Broadcast to all connected agents using existing WebSocket manager
@@ -55,7 +56,7 @@ class LiveChatSocketManager:
         ip_meta = session.ip_metadata_dict
         
         session_data = {
-            "type": "session_updated",
+            "type": "SESSION_UPDATED",
             "session_id": session.session_id,
             "visitor_uuid": session.visitor_uuid,
             "session_status": session.session_status,
@@ -73,6 +74,7 @@ class LiveChatSocketManager:
             "message_count": session.message_count or 0,
             "created_at_ist": format_ist_datetime(session.created_at),
             "last_message_ist": format_ist_datetime(session.last_activity_at),
+            "lead_insights": getattr(session, 'lead_insights', None),
         }
         
         await self._broadcast_to_dashboard(session_data)
@@ -80,7 +82,7 @@ class LiveChatSocketManager:
     async def notify_lead_form_submitted(self, session, lead_data: dict, workspace_id: str):
         """Notify agents when visitor submits lead form."""
         await self._broadcast_to_dashboard({
-            'type': 'lead_form_submitted',
+            'type': 'LEAD_FORM_SUBMITTED',
             'session_id': session.session_id,
             'visitor_uuid': session.visitor_uuid,
             'lead_data': {
@@ -96,7 +98,7 @@ class LiveChatSocketManager:
     async def notify_message(self, message, session, workspace_id: str):
         """Notify agents of new message."""
         message_data = {
-            'type': 'new_message',
+            'type': 'NEW_MESSAGE',
             'id': message.id,
             'session_id': session.visitor_uuid,
             'message_type': message.message_type,
@@ -110,7 +112,7 @@ class LiveChatSocketManager:
     async def notify_typing(self, visitor_uuid: str, is_typing: bool, workspace_id: str):
         """Notify agents of typing status."""
         await self._broadcast_to_dashboard({
-            'type': 'typing_status',
+            'type': 'TYPING_STATUS',
             'session_id': visitor_uuid,
             'is_typing': is_typing
         })

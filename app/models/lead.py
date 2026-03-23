@@ -75,6 +75,7 @@ class Lead(Base):
     country_interested = Column(String(255), nullable=True)
     product            = Column(String(255), nullable=True)
     requirement_type   = Column(String(255), nullable=True)
+    session_id         = Column(String(36),  nullable=True, index=True)
 
 
     # ── Concurrency & Audit ───────────────────────────────────────────────

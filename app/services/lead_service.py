@@ -129,6 +129,8 @@ def create_or_update_lead(
         lead.email = normalized_email
         lead.phone = normalized_phone
         lead.status = LeadStatus.NEW # Promote to NEW
+        if session_id:
+            lead.session_id = session_id
         # DO NOT restore deleted leads - they stay deleted
         lead.updated_at = datetime.now(timezone.utc)
         
@@ -158,6 +160,8 @@ def create_or_update_lead(
         lead.email = normalized_email
         lead.phone = normalized_phone
         lead.status = LeadStatus.NEW # Promote to NEW
+        if session_id:
+            lead.session_id = session_id
         lead.updated_at = datetime.now(timezone.utc)
 
         if metadata:
@@ -181,6 +185,7 @@ def create_or_update_lead(
             status     = LeadStatus.NEW,
             source     = source,
             tenant_id  = tenant_id,
+            session_id = session_id,
             created_at = datetime.now(timezone.utc)
         )
         db.add(lead)

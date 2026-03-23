@@ -133,16 +133,39 @@ class SessionService:
         self.db.refresh(session)
         return session
 
-    def get_active_sessions(self) -> List[ChatSession]:
-        """Get all active sessions for the live chat dashboard."""
-        stmt = (
-            select(ChatSession)
-            .where(ChatSession.session_status.in_(["active", "bot"]))
-            .order_by(ChatSession.last_activity_at.desc())
+    def get_active_sessions(self, tenant_id: int = None) -> List[ChatSession]:
+        """
+        Get all truly active sessions:
+        1. Marked ACTIVE in DB
+        2. AND Not deleted
+        3. AND (Connected via WebSocket OR Active within the last hour)
+        """
+        from datetime import datetime, timedelta
+        from app.services.websocket_manager import manager
+        
+        stale_cutoff = datetime.utcnow() - timedelta(hours=1)
+        
+        # Base query
+        query = self.db.query(ChatSession).filter(
+            ChatSession.session_status == SessionStatus.ACTIVE,
+            ChatSession.is_deleted == False
         )
         
-        result = self.db.execute(stmt)
-        return list(result.scalars().all())
+        if tenant_id:
+            query = query.filter(ChatSession.tenant_id == tenant_id)
+            
+        sessions = query.order_by(ChatSession.last_activity_at.desc()).all()
+        
+        # Filter for online or recent activity
+        filtered_sessions = []
+        for s in sessions:
+            is_online = manager.has_client(s.visitor_uuid)
+            is_recent = s.last_activity_at >= stale_cutoff if s.last_activity_at else False
+            
+            if is_online or is_recent:
+                filtered_sessions.append(s)
+                
+        return filtered_sessions
 
     def agent_takeover(self, session_id: str, agent_name: str) -> ChatSession:
         """Handle agent takeover of bot conversation."""
@@ -365,12 +388,15 @@ def save_message(db: Session, session: ChatSession, message_text: str, message_t
     session.last_activity_at = now
     session.last_activity_utc = now
     
+    db.commit()
+    db.refresh(message)
+    
     return message
 
 
 def update_chat_state(db: Session, session: ChatSession, new_state: str) -> None:
     """Update the chat state of a session."""
-    session.chat_state = new_state
+    session.chat_state = str(new_state).upper()
     db.commit()
 
 def close_session(db: Session, session_id: str) -> bool:

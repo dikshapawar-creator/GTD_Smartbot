@@ -31,3 +31,13 @@ class ChatMessage(Base):
         # Covers: WHERE session_id = ? ORDER BY created_at_utc ASC LIMIT ? OFFSET ?
         Index("ix_chat_messages_session_time", "session_id", "created_at_utc"),
     )
+
+    @property
+    def created_at_ist(self) -> str:
+        """Format UTC timestamp to IST string for frontend consistency."""
+        if not self.created_at_utc:
+            return ""
+        from datetime import timezone, timedelta
+        # UTC to IST (+5:30)
+        ist_time = self.created_at_utc.replace(tzinfo=timezone.utc).astimezone(timezone(timedelta(hours=5, minutes=30)))
+        return ist_time.strftime("%d %b %Y, %I:%M %p")

@@ -60,6 +60,11 @@ async def submit_lead(
              logger.warning(f"Honeypot triggered from IP {request.client.host if request.client else 'unknown'}")
              return {"success": True, "message": "Thank you. Our team will contact you soon."} # Fake success for bots
 
+        # 0.2 Junk Lead Prevention
+        if lead_req.business_email and lead_req.business_email.lower().startswith("pending"):
+             logger.info(f"Skipping junk lead with email: {lead_req.business_email}")
+             return {"success": True, "message": "We’ve received your message and will get back to you soon."}
+
         # 0.1 Rate Limiting (IP-based)
         client_ip = request.client.host if request.client else "unknown"
         now = time()
@@ -113,25 +118,74 @@ async def submit_lead(
             chat_session.lead_email = lead_req.business_email
             chat_session.lead_phone = lead_req.contact_number
             chat_session.lead_company = lead_req.company_name
+            chat_session.is_lead = True
             chat_session.last_activity_at = datetime.now(timezone.utc)
             chat_session.last_activity_utc = datetime.now(timezone.utc)
             
-            # 3.1 Insert Automated History Message
+            # 3.0 Calculate Lead Insights (Breakdown for CRM)
+            import json
+            profile_score = 0
+            if lead_req.full_name: profile_score += 2.5
+            if lead_req.business_email: profile_score += 2.5
+            if lead_req.contact_number: profile_score += 2.5
+            if lead_req.company_name: profile_score += 2.5
+            
+            # Refined Engagement: based on message count (min 0, max 10)
+            engagement_score = min(chat_session.message_count or 0, 10)
+            
+            # Refined Intent: high for form submit, further boosted by activity
+            intent_score = min(7 + (engagement_score // 3), 10)
+            
+            lead_insights_data = {
+                "history": 0,
+                "engagement": f"{engagement_score}/10",
+                "intent_signals": f"{intent_score}/10",
+                "profile_completeness": f"{int(profile_score)}/10"
+            }
+            chat_session.lead_insights = json.dumps(lead_insights_data)
+            chat_session.lead_score = int(profile_score * 4 + engagement_score * 3 + intent_score * 3) # Normalized to 100
+            
+            # 3.1 Insert Automated History Message (Persistent Form)
+            import json
+            form_data = {
+                "full_name": lead_req.full_name,
+                "company_name": lead_req.company_name,
+                "business_email": lead_req.business_email,
+                "contact_number": lead_req.contact_number,
+                "website": lead_req.website,
+                "status": "submitted"
+            }
+            
             system_msg = ChatMessage(
                 session_id=chat_session.session_id,
-                message=f"System: Lead form submitted. Name: {lead_req.full_name}, Email: {lead_req.business_email}, Phone: {lead_req.contact_number}, Company: {lead_req.company_name}",
-                role="system",
-                sender_type="system",
-                created_at=datetime.now(timezone.utc)
+                message_text=json.dumps(form_data),
+                message_type="form",
+                created_at_utc=datetime.now(timezone.utc),
+                created_at_local=datetime.now(timezone.utc)
             )
             db.add(system_msg)
+            
+            # 🔥 CRITICAL: Ensure chat_session is attached to current DB session
+            db.add(chat_session)
             db.commit()
             
             # 🔥 Broadcast SESSION_UPDATED to Dashboard (Real-time CRM Sync)
             session_item = format_session_for_crm(chat_session)
+            
+            # Broadcast to global dashboard pool
             await socket_manager.broadcast_event(
                 "SESSION_UPDATED", 
                 session_item
+            )
+            
+            # 🚀 DIRECT NOTIFICATION: Send specifically to the agent handling this session
+            from app.services.websocket_manager import manager
+            await manager.send_to_agent(
+                chat_session.visitor_uuid,
+                {
+                    "type": "SESSION_UPDATED",
+                    **session_item
+                }
             )
             
             # Also broadcast the new system message
@@ -139,9 +193,10 @@ async def submit_lead(
                 "NEW_MESSAGE",
                 {
                     "session_id": chat_session.session_id,
-                    "message": system_msg.message,
+                    "message": system_msg.message_text,
                     "role": "system",
-                    "created_at": system_msg.created_at.isoformat()
+                    "created_at": system_msg.created_at_utc.isoformat(),
+                    "created_at_ist": system_msg.created_at_ist
                 }
             )
             logger.info(f"Updated session {chat_session.session_id} with lead {lead.id}")
@@ -150,8 +205,13 @@ async def submit_lead(
 
         return {
             "success": True,
-            "message": "Thank you. Our team will contact you soon.",
-            "warning": "This email matches an existing record. Your request has been updated." if is_duplicate else None,
+            "message": """We’ve received your message and will get back to you soon.
+
+For more details, feel free to reach us anytime:
+💬 https://wa.me/918527376675
+📞 WhatsApp: +91 8527376675
+
+We’ll be happy to assist you with complete support.""",
             "reference_id": str(lead.id)
         }
     except IntegrityError as e:

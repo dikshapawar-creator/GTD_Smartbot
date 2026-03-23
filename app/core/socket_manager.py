@@ -36,10 +36,13 @@ class WebSocketManager:
         if not self.broadcast_pool:
             return
 
-        payload = {
-            "type": event_type,
-            "data": data
-        }
+        if isinstance(data, dict):
+            payload = {"type": event_type, **data}
+        else:
+            payload = {
+                "type": event_type,
+                "data": data
+            }
         
         # Create a copy of the pool to iterate over to avoid modification errors
         dead_connections = set()

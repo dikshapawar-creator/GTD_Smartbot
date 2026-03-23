@@ -83,14 +83,50 @@ def seed_intents():
         # 9. Demo Request
         upsert_intent(db, "REQUEST_DEMO", 
             ["request demo", "book demo", "see trade data platform demo", "schedule demo", "product demo", "live demo trade database"],
-            "Sure! I can arrange a live demo of our trade intelligence platform.\nPlease share your name and business email so we can schedule a suitable time.",
+            """Thank you. We will arrange a call for you shortly.
+
+You can discuss all your questions with our team during the meeting.
+
+Regarding your data and requirements, our team will provide you with the appropriate solution.""",
             {"cta_label": "Schedule Demo", "action": "OPEN_LEAD_FORM"}
         )
 
         # 10. Lead Collection
         upsert_intent(db, "LEAD_COLLECTION", 
             ["contact sales", "talk to sales", "business inquiry", "enterprise plan", "company trade solution", "corporate trade data access"],
-            "Thank you for your interest in our trade intelligence solutions.\nPlease share your full name, company name, and business email so our team can assist you."
+            """Thank you. We will arrange a call for you shortly.
+
+You can discuss all your questions with our team during the meeting.
+
+Regarding your data and requirements, our team will provide you with the appropriate solution."""
+        )
+
+        # 11. Specialized Demo Intents
+        upsert_intent(db, "SALES_DEMO", ["sales demo", "expert talk", "consultation"], 
+            """Thank you. We will arrange a call for you shortly.
+
+You can discuss all your questions with our team during the meeting.
+
+Regarding your data and requirements, our team will provide you with the appropriate solution."""
+        )
+        upsert_intent(db, "DEMO", ["demo", "show me", "walkthrough"], 
+            """Thank you. We will arrange a call for you shortly.
+
+You can discuss all your questions with our team during the meeting.
+
+Regarding your data and requirements, our team will provide you with the appropriate solution."""
+        )
+
+        # 12. Data Provider Partnership
+        upsert_intent(db, "DATA_PROVIDER_DATASOURCE", 
+            ["sell data", "data provider", "provide trade data", "data partnership", "data vendor", "contribute data", "customs data provider", "data supplier"],
+            "We collaborate with data providers who can supply import-export or customs trade data.\nIf you are interested in selling or साझेदारी, please share your company details and type of data you can provide."
+        )
+
+        # 13. API Access Request
+        upsert_intent(db, "API_ACCESS_REQUEST", 
+            ["API access", "trade data API", "developer API", "integrate API", "data API", "API documentation", "API pricing"],
+            "We offer API access for seamless integration of trade data into your system.\nPlease share your use case and technical requirements, and our team will assist you with API details and access."
         )
 
         db.commit()

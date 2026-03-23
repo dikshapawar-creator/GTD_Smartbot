@@ -1,5 +1,5 @@
 import logging
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, BackgroundTasks
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime, timezone
@@ -27,7 +27,7 @@ router = APIRouter(prefix="/chat", tags=["Chatbot"])
 
 # ── 1. Session Initialization ──────────────────────────────────────────
 @router.post("/session/init", response_model=SessionInitResponse)
-async def initialize_session(request: Request, response: Response, init_req: Optional[SessionInitRequest] = None, db: Session = Depends(get_db)):
+async def initialize_session(request: Request, response: Response, background_tasks: BackgroundTasks, init_req: Optional[SessionInitRequest] = None, db: Session = Depends(get_db)):
     """
     Initializes or restores a chatbot session.
     """
@@ -40,10 +40,12 @@ async def initialize_session(request: Request, response: Response, init_req: Opt
             return {
                 "session_token": str(active_session.visitor_uuid),
                 "message": "Welcome back to GTD Service! How can I assist with your trade intelligence today?",
-                "state": active_session.chat_state,
-                "type": "CTA",
-                "cta_label": "Book Demo",
-                "action": "OPEN_LEAD_FORM",
+                "state": str(active_session.chat_state or "START").replace("ChatState.", "").replace("CHATSTATE.", "").upper() if active_session.chat_state != "GREETING" else "START",
+                "type": ResponseType.CTA,
+                "ctas": [
+                    {"label": "Book Demo", "action": "OPEN_LEAD_FORM", "icon": "🚀"},
+                    {"label": "Connect with Data Expert", "action": "HANDOFF", "icon": "💬", "type": "secondary"}
+                ],
                 "conversation_status": active_session.conversation_mode,
                 "server_time_utc": datetime.now(timezone.utc)
             }
@@ -53,11 +55,20 @@ async def initialize_session(request: Request, response: Response, init_req: Opt
     meta = utils.get_visitor_metadata(request)
     fingerprint = utils.generate_visitor_fingerprint(client_ip, meta["user_agent"])
 
-    # 🚨 SECURITY: Blocked Visitor Check - TEMPORARILY DISABLED FOR DEBUGGING
-    # is_blocked = db.query(BlockedVisitor).filter(
-    #     (BlockedVisitor.ip_address == client_ip) | 
-    #     (BlockedVisitor.visitor_fingerprint == fingerprint)
-    # ).first()
+    # 🚨 SECURITY: Blocked Visitor Check
+    is_blocked = db.query(BlockedVisitor).filter(
+        (BlockedVisitor.ip_address == client_ip) | 
+        (BlockedVisitor.visitor_fingerprint == fingerprint)
+    ).first()
+    
+    if is_blocked:
+        logger.warning(f"Blocked visitor attempt: IP={client_ip}, FP={fingerprint}")
+        # We don't want to give too much away, just a generic error or silent ignore
+        return {
+            "session_token": None,
+            "message": "Access restricted. Please contact support if you believe this is an error.",
+            "conversation_status": "CLOSED"
+        }
     
     # if is_blocked:
     #     logger.warning(
@@ -168,21 +179,30 @@ async def initialize_session(request: Request, response: Response, init_req: Opt
         max_age=settings.SESSION_EXPIRY_MINUTES * 60
     )
 
-    return {
+    result_resp = {
         "session_token": str(new_session.visitor_uuid),
         "message": greeting_res["message"],
-        "state": ChatState.START,
-        "type": "CTA",
-        "cta_label": "Book Demo",
-        "action": "OPEN_LEAD_FORM",
+        "state": ChatState.START.value,
+        "type": ResponseType.CTA,
+        "ctas": [
+            {"label": "Book Demo", "action": "OPEN_LEAD_FORM", "icon": "🚀"},
+            {"label": "Connect with Data Expert", "action": "HANDOFF", "icon": "💬", "type": "secondary"}
+        ],
         "conversation_status": new_session.conversation_mode,
         "server_time_utc": datetime.now(timezone.utc)
     }
 
+    # ⏰ INACTIVITY: Monitor for 60s after first greeting
+    background_tasks.add_task(send_inactivity_message, str(new_session.visitor_uuid), new_session.last_activity_utc)
+    
+    return result_resp
+
 
 # ── 1. AGENT & SESSION GATES ──────────────────────────────────────────
+from app.services.inactivity_service import send_inactivity_message
+
 @router.post("/message", response_model=ChatMessageResponse)
-async def send_message(request: Request, msg_req: ChatMessageRequest, db: Session = Depends(get_db)):
+async def send_message(request: Request, msg_req: ChatMessageRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """
     Overhauled Chatbot Logic:
     - Stops bot reply when agent is active (joins WS or sends message).
@@ -193,7 +213,7 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
     session_id = request.cookies.get(settings.SESSION_COOKIE_NAME)
 
     # Fallback: read session UUID from Authorization: Bearer <session_uuid>
-    # This handles cross-origin requests where cookies are blocked by the browser
+    # This handles cross-origin requests where cookies are blocked by the browser 
     if not session_id:
         auth_header = request.headers.get('Authorization', '')
         if auth_header.startswith('Bearer '):
@@ -219,7 +239,7 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
     is_agent_active = (
         active_session.agent_joined or 
         active_session.assigned_agent_id is not None or 
-        active_session.chat_state == ChatState.HANDOFF_SENT or
+        active_session.chat_state == ChatState.HANDOFF_SENT.value or
         active_session.conversation_mode == ConversationMode.HUMAN
     )
 
@@ -256,13 +276,21 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
             "sessionId": str(active_session.visitor_uuid),
             "message": "", 
             "type": ResponseType.MESSAGE,
-            "state": active_session.chat_state,
+            "state": str(active_session.chat_state or "START").replace("ChatState.", "").replace("CHATSTATE.", "").upper() if active_session.chat_state != "GREETING" else "START",
             "conversation_status": active_session.conversation_mode,
             "server_time_utc": datetime.now(timezone.utc)
         }
 
     # ── 2. INTENT & LEAD LOGIC ──────────────────────────────────────────
     user_message = msg_req.message
+    
+    # ✅ PERSISTENCE: Save user message early
+    session_service.save_message(db, active_session, user_message, "user")
+    db.commit()
+
+    # ⏰ INACTIVITY: Monitor for 60s
+    now_aware = datetime.now(timezone.utc)
+    background_tasks.add_task(send_inactivity_message, str(active_session.visitor_uuid), now_aware)
     
     # Analytics: Spam Detection
     from app.services.spam_service import check_message_spam
@@ -273,7 +301,7 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
         return {
             "sessionId": str(active_session.visitor_uuid),
             "message": "Security policy violation detected. Session closed.",
-            "state": active_session.chat_state,
+            "state": str(active_session.chat_state or "START").replace("ChatState.", "").replace("CHATSTATE.", "").upper() if active_session.chat_state != "GREETING" else "START",
             "conversation_status": active_session.conversation_mode,
             "server_time_utc": datetime.now(timezone.utc)
         }
@@ -285,9 +313,6 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
         active_session.language = lang_code
         db.commit()
 
-    # Save user message immediately to DB
-    session_service.save_message(db, active_session, user_message, "user")
-    
     # Analytics: Lead Scoring (Evaluate translated message)
     from app.services.scoring_service import update_session_score
     active_session = update_session_score(db, active_session, translated_message)
@@ -306,7 +331,7 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
             "No problem.\n\n"
             "Please wait while I connect you with our expert."
         )
-        active_session.chat_state = ChatState.HANDOFF_SENT
+        active_session.chat_state = ChatState.HANDOFF_SENT.value
         db.commit()
         session_service.save_message(db, active_session, bot_msg, "bot")
         db.commit() # COMMIT BEFORE BROADCAST
@@ -335,7 +360,7 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
         return {
             "sessionId": str(active_session.visitor_uuid),
             "message": bot_msg,
-            "state": active_session.chat_state,
+            "state": str(active_session.chat_state or "START").replace("ChatState.", "").replace("CHATSTATE.", "").upper() if active_session.chat_state != "GREETING" else "START",
             "conversation_status": active_session.conversation_mode,
             "server_time_utc": datetime.now(timezone.utc)
         }
@@ -374,109 +399,58 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, db: Sessio
         
         return response_data
 
-    # Use the ChatbotService for consistent state management
+    # Use the ChatbotService for centralized intent and state management
     from app.services.chatbot import ChatbotService
     
-    # Handle greetings first - with CTA
-    if intent == IntentType.GREETING and not active_session.has_greeted:
-        config = db.query(IntentConfig).filter(IntentConfig.intent_key == "GREETING").first()
-        bot_msg = config.response_text if config else "Hello! Welcome to GTD Service! Are you interested in Import or Export?"
-        active_session.has_greeted = True
-        active_session.chat_state = ChatState.START
-        db.commit()
-        session_service.save_message(db, active_session, bot_msg, "bot")
-        db.commit()
+    try:
+        chatbot_response = ChatbotService.handle_message(db, active_session, translated_message)
+        bot_msg = chatbot_response.get("message", "")
         
-        # Return CTA response for greeting too
+        # Determine Response Type (CTA or MESSAGE)
+        res_type = ResponseType.CTA if chatbot_response.get("type") == "CTA" else ResponseType.MESSAGE
+        
         return await broadcast_and_return(bot_msg, {
             "sessionId": str(active_session.visitor_uuid),
             "message": bot_msg,
-            "state": active_session.chat_state,
+            "state": str(chatbot_response.get("state") or active_session.chat_state or "START").replace("ChatState.", "").replace("CHATSTATE.", "").upper() if (chatbot_response.get("state") or active_session.chat_state) != "GREETING" else "START",
+            "type": res_type,
+            "cta_label": chatbot_response.get("cta_label") if res_type == ResponseType.CTA else None,
+            "action": chatbot_response.get("action") if res_type == ResponseType.CTA else None,
+            "intent": chatbot_response.get("intent"),
+            "conversation_status": active_session.conversation_mode,
+            "server_time_utc": datetime.now(timezone.utc)
+        })
+    except Exception as e:
+        logger.error(f"ChatbotService error: {e}")
+        bot_msg = "I'm here to help! Are you interested in Import or Export services?"
+        session_service.save_message(db, active_session, bot_msg, "bot")
+        db.commit()
+        
+        # Return CTA even for fallback messages
+        return await broadcast_and_return(bot_msg, {
+            "sessionId": str(active_session.visitor_uuid),
+            "message": bot_msg,
+            "state": str(active_session.chat_state or "START").replace("ChatState.", "").replace("CHATSTATE.", "").upper() if active_session.chat_state != "GREETING" else "START",
             "type": ResponseType.CTA,
             "cta_label": "Book Demo",
             "action": "OPEN_LEAD_FORM",
             "conversation_status": active_session.conversation_mode,
             "server_time_utc": datetime.now(timezone.utc)
         })
-    
-    # Handle specialized intents with immediate CTA
-    elif intent in [
-        IntentType.REQUEST_DEMO, IntentType.LEAD_COLLECTION, IntentType.DEMO,
-        IntentType.BUYER_SEARCH, IntentType.SUPPLIER_SEARCH, IntentType.HS_CODE_SEARCH,
-        IntentType.COMPETITOR_ANALYSIS, IntentType.SHIPMENT_RECORDS, 
-        IntentType.COUNTRY_TRADE_ANALYSIS, IntentType.PRODUCT_MARKET_RESEARCH,
-        IntentType.PRICING_INQUIRY, IntentType.IMPORT_EXPORT
-    ]:
-        config = db.query(IntentConfig).filter(IntentConfig.intent_key == intent.value).first()
-        if config and config.response_text:
-            bot_msg = config.response_text
-        else:
-            bot_msg = "Great choice! To get detailed insights and personalized assistance, please Book a Demo with our experts."
-        
-        active_session.chat_state = ChatState.COMPLETE
-        db.commit()
-        session_service.save_message(db, active_session, bot_msg, "bot")
-        db.commit()
-        
-        # Return CTA response for immediate lead form
-        return await broadcast_and_return(bot_msg, {
-            "sessionId": str(active_session.visitor_uuid),
-            "message": bot_msg,
-            "state": active_session.chat_state,
-            "type": ResponseType.CTA,
-            "cta_label": "Book Demo",
-            "action": "OPEN_LEAD_FORM",
-            "conversation_status": active_session.conversation_mode,
-            "server_time_utc": datetime.now(timezone.utc)
-        })
-    
-    # Use ChatbotService for the main conversation flow - with CTA
-    else:
-        try:
-            chatbot_response = ChatbotService.handle_message(db, active_session, translated_message)
-            bot_msg = chatbot_response.get("message", "")
-            
-            # Always return CTA response for ChatbotService responses too
-            return await broadcast_and_return(bot_msg, {
-                "sessionId": str(active_session.visitor_uuid),
-                "message": bot_msg,
-                "state": chatbot_response.get("state", active_session.chat_state),
-                "type": ResponseType.CTA,
-                "cta_label": chatbot_response.get("cta_label", "Book Demo"),
-                "action": chatbot_response.get("action", "OPEN_LEAD_FORM"),
-                "conversation_status": active_session.conversation_mode,
-                "server_time_utc": datetime.now(timezone.utc)
-            })
-        except Exception as e:
-            logger.error(f"ChatbotService error: {e}")
-            bot_msg = "I'm here to help! Are you interested in Import or Export services?"
-            session_service.save_message(db, active_session, bot_msg, "bot")
-            db.commit()
-            
-            # Return CTA even for fallback messages
-            return await broadcast_and_return(bot_msg, {
-                "sessionId": str(active_session.visitor_uuid),
-                "message": bot_msg,
-                "state": active_session.chat_state,
-                "type": ResponseType.CTA,
-                "cta_label": "Book Demo",
-                "action": "OPEN_LEAD_FORM",
-                "conversation_status": active_session.conversation_mode,
-                "server_time_utc": datetime.now(timezone.utc)
-            })
 
     # This code should not be reached since all paths above return a response
     # But keeping as a safety fallback
     return {
         "sessionId": str(active_session.visitor_uuid),
         "message": "How can I assist you today?",
-        "state": active_session.chat_state,
+        "state": str(active_session.chat_state or "START").replace("ChatState.", "").replace("CHATSTATE.", "").upper() if active_session.chat_state != "GREETING" else "START",
         "type": ResponseType.CTA,
         "cta_label": "Book Demo", 
         "action": "OPEN_LEAD_FORM",
         "conversation_status": active_session.conversation_mode,
         "server_time_utc": datetime.utcnow()
     }
+
 
 # ── 3. Chat History (Persistence) ─────────────────────────────────────
 @router.get("/history", response_model=List[ChatMessageResponse])
@@ -529,13 +503,22 @@ async def get_chat_history(request: Request, db: Session = Depends(get_db)):
         # Determine format based on structure (tuple from join vs direct instance)
         msg_obj = m[0] if isinstance(m, tuple) else m
         
+        # Determine response metadata
+        m_type = ResponseType.MESSAGE
+        m_role = msg_obj.message_type
+        
+        if msg_obj.message_type == 'form':
+            m_type = ResponseType.FORM
+            m_role = 'bot' # Show as bot in UI
+        
         history.append({
             "sessionId": str(active_session.visitor_uuid),
             "message": msg_obj.message_text,
-            "role": msg_obj.message_type, # Frontend expects 'role' for UI
-            "state": active_session.chat_state, # Defaulting to current state
-            "type": ResponseType.MESSAGE,
+            "role": m_role,
+            "state": str(active_session.chat_state or "START").replace("ChatState.", "").replace("CHATSTATE.", "").upper() if active_session.chat_state != "GREETING" else "START",
+            "type": m_type,
             "conversation_status": active_session.conversation_mode,
+            "created_at_ist": msg_obj.created_at_ist if hasattr(msg_obj, 'created_at_ist') else None,
         })
 
     return history
@@ -548,3 +531,5 @@ async def end_session(request: Request, response: Response, db: Session = Depend
         session_service.close_session(db, session_id)
     response.delete_cookie(settings.SESSION_COOKIE_NAME)
     return {"status": "success"}
+
+

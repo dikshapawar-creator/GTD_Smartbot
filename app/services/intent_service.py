@@ -23,6 +23,9 @@ class IntentType(Enum):
     PRICING_INQUIRY = "PRICING_INQUIRY"
     REQUEST_DEMO = "REQUEST_DEMO"
     LEAD_COLLECTION = "LEAD_COLLECTION"
+    SALES_DEMO = "SALES_DEMO"
+    DATA_PROVIDER_DATASOURCE = "DATA_PROVIDER_DATASOURCE"
+    API_ACCESS_REQUEST = "API_ACCESS_REQUEST"
     UNKNOWN = "UNKNOWN"
 
 def detect_intent(db: Session, message: str) -> IntentType:
@@ -41,42 +44,58 @@ def detect_intent(db: Session, message: str) -> IntentType:
 
     # 1. HANDOFF (Highest Priority - Hardcoded safety)
     if any(word in message for word in [
-        "agent", "human", "representative", "call me", 
-        "no", "skip", "not interested", "later", "talk to person"
+        "agent", "human", "representative", "call me", "talk to person", "intervene",
+        "no", "skip", "not interested", "later", "not now", "no thanks", "stop", "cancel"
     ]):
         return IntentType.HANDOFF
 
-    # 2. Dynamic DB-based Detection with Priority Order
+    # 2. Dynamic DB-based Detection (PRIMARY)
     from app.models.intent_config import IntentConfig
     
-    # Define priority order - specific intents first, then general ones
-    priority_order = [
-        "GREETING", "REQUEST_DEMO", "LEAD_COLLECTION", "PRICING_INQUIRY",
-        "BUYER_SEARCH", "SUPPLIER_SEARCH", "HS_CODE_SEARCH", 
-        "COMPETITOR_ANALYSIS", "SHIPMENT_RECORDS", "COUNTRY_TRADE_ANALYSIS",
-        "PRODUCT_MARKET_RESEARCH", "SALES_DEMO", "IMPORT_EXPORT"  # IMPORT_EXPORT last
-    ]
-    
-    # First, check intents in priority order
-    for intent_key in priority_order:
-        config = db.query(IntentConfig).filter(IntentConfig.intent_key == intent_key).first()
-        if config and config.keywords:
-            if any(keyword.lower() in message for keyword in config.keywords):
-                try:
-                    return IntentType(config.intent_key)
-                except ValueError:
-                    logger.warning(f"Unknown intent_key in DB: {config.intent_key}")
-                    continue
-    
-    # Then check any remaining intents not in priority list
     all_configs = db.query(IntentConfig).all()
+    best_match = None
+    longest_kw_len = 0
+
     for config in all_configs:
-        if config.intent_key not in priority_order and config.keywords:
-            if any(keyword.lower() in message for keyword in config.keywords):
-                try:
-                    return IntentType(config.intent_key)
-                except ValueError:
-                    logger.warning(f"Unknown intent_key in DB: {config.intent_key}")
-                    continue
+        keywords = config.keywords # List from JSON
+        if not keywords: continue
+        
+        for kw in keywords:
+            kw = kw.lower().strip()
+            # Check for substring match (prioritize longer phrases for specificity)
+            if kw in message:
+                if len(kw) > longest_kw_len:
+                    longest_kw_len = len(kw)
+                    best_match = config.intent_key
+
+    if best_match:
+        try:
+            return IntentType(best_match)
+        except ValueError:
+            return IntentType.UNKNOWN
+
+    # 3. Fallback to Hardcoded logic (Strictly for missing DB config)
+    # Reordered to check specific intents BEFORE generic ones like IMPORT_EXPORT
+    priority_fallbacks = [
+        (IntentType.GREETING, ["hi", "hello", "hey", "hii", "greetings", "good morning"]),
+        (IntentType.BUYER_SEARCH, ["buyer", "buyers", "find buyers", "who buys", "buyer list"]),
+        (IntentType.SUPPLIER_SEARCH, ["supplier", "suppliers", "find suppliers", "who sells", "supplier list"]),
+        (IntentType.HS_CODE_SEARCH, ["hs code", "hsn code", "tariff", "classification"]),
+        (IntentType.COMPETITOR_ANALYSIS, ["competitor", "competition", "compete", "benchmark"]),
+        (IntentType.SHIPMENT_RECORDS, ["records", "shipment details", "bill of lading", "manifest"]),
+        (IntentType.COUNTRY_TRADE_ANALYSIS, ["country analysis", "trade by country", "global trade"]),
+        (IntentType.PRODUCT_MARKET_RESEARCH, ["market research", "demand", "product research"]),
+        (IntentType.PRICING_INQUIRY, ["price", "cost", "pricing", "subscription", "fees", "how much"]),
+        (IntentType.REQUEST_DEMO, ["book demo", "schedule demo", "request demo", "trial"]),
+        (IntentType.LEAD_COLLECTION, ["contact me", "callback", "call back", "reach out"]),
+        (IntentType.DEMO, ["demo", "show me", "tutorial"]),
+        (IntentType.IMPORT_EXPORT, ["import", "export", "trade", "importing", "exporting"]), # Generic LAST
+    ]
+
+    for intent, keywords in priority_fallbacks:
+        if any(kw in message for kw in keywords):
+            return intent
 
     return IntentType.UNKNOWN
+
+
