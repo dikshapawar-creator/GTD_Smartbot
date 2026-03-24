@@ -14,6 +14,7 @@ from app.api.admin import router as admin_router
 from app.api.sales import router as sales_router
 from app.api.live_chat import router as live_chat_router
 from app.api.ws_chat import router as ws_router, legacy_router as legacy_ws_router
+from app.api.bot_config import router as bot_config_router
 from app.services.live_chat_socket import init_live_chat_socket
 
 # ── Simplified Production-Ready Logging ──────────────────────────────
@@ -132,6 +133,14 @@ def create_app() -> FastAPI:
     app.include_router(intents_router)
     app.include_router(admin_router)
     app.include_router(sales_router)
+    app.include_router(bot_config_router)
+
+    # Mount static files for uploaded logos
+    import os
+    from fastapi.staticfiles import StaticFiles
+    static_dir = os.path.join(os.path.dirname(__file__), "static")
+    os.makedirs(static_dir, exist_ok=True)
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
     # Health Checks
     @app.get("/health", tags=["System"])

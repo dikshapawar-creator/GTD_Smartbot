@@ -124,6 +124,7 @@ def init_db():
         from app.models.intent_config import IntentConfig
         from app.models.blocked import BlockedVisitor
         from app.models.auth import User, Role, Tenant, RefreshToken, PasswordReset, AuditLog
+        from app.models.bot_config import BotConfig
 
         logger.info("Database: Initialization started...")
 
@@ -134,6 +135,26 @@ def init_db():
 
         # 2. Synchronize Schema with metadata refresh
         Base.metadata.create_all(bind=engine)
+
+        # 2.5 Seed default BotConfig for the default tenant if missing
+        try:
+            _session = SessionLocal()
+            existing = _session.query(BotConfig).filter(
+                BotConfig.tenant_id == settings.DEFAULT_TENANT_ID
+            ).first()
+            if not existing:
+                _session.add(BotConfig(
+                    tenant_id=settings.DEFAULT_TENANT_ID,
+                    chatbot_name="GTD Support",
+                    chatbot_logo_url="/logo.png",
+                    fab_tooltip="Trade Support",
+                    welcome_text="Welcome to GTD Service."
+                ))
+                _session.commit()
+                logger.info("Database: Seeded default BotConfig.")
+            _session.close()
+        except Exception as e:
+            logger.warning(f"Database: BotConfig seeding skipped — {e}")
         
         # 3. Hot-fix: Ensure tenant_id columns exist (SQL Server)
         _ensure_tenant_id_columns(engine)

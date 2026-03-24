@@ -133,6 +133,10 @@ async def initialize_session(request: Request, response: Response, background_ta
 
     if not existing_session:
         logger.info(f"[SESSION_INIT] Creating NEW session for visitor {visitor_uuid_ext}")
+        # Use tenant_id from request if available, otherwise default
+        requested_tenant_id = (init_req.tenant_id if init_req and init_req.tenant_id 
+                             else settings.DEFAULT_TENANT_ID)
+        
         new_session = session_service.create_session(
             db, 
             ip_address=client_ip,
@@ -144,11 +148,11 @@ async def initialize_session(request: Request, response: Response, background_ta
             os_name=meta["os"],
             device_type=meta["device_type"],
             fingerprint=fingerprint,
-            tenant_id=settings.DEFAULT_TENANT_ID,
+            tenant_id=requested_tenant_id,
             visitor_uuid=visitor_uuid_ext,
             lead_id=carry_over_lead_id # 🔥 Identity Retention
         )
-        logger.info(f"[SESSION_INIT] NEW session created: {new_session.session_id}")
+        logger.info(f"[SESSION_INIT] NEW session created: {new_session.session_id} for tenant {requested_tenant_id}")
     
     # 🚨 COMMIT BEFORE BROADCAST
     db.commit()
@@ -481,6 +485,7 @@ async def get_chat_history(request: Request, db: Session = Depends(get_db)):
             .filter(
                 ChatSession.visitor_uuid == active_session.visitor_uuid,
                 ChatSession.visitor_fingerprint == active_session.visitor_fingerprint,
+                ChatSession.tenant_id == active_session.tenant_id,
                 ChatSession.is_deleted == False
             )
             .order_by(ChatMessage.created_at_utc.desc())

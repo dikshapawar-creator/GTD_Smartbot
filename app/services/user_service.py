@@ -63,20 +63,30 @@ class UserService:
     def deactivate_user(db: Session, user_id: int, creator: User) -> bool:
         """
         Rules:
-        - Only administrator (level 3)
-        - Same tenant
+        - Must be same tenant
         - Cannot deactivate self
-        - Admin cannot deactivate higher/equal level? (Specific rule: Admin cannot deactivate administrator)
+        - Hierarchy: Can only deactivate users with a LOWER role level than yours.
+        - Level 3 (Administrator) can deactivate Level 2 and Below.
+        - Level 2 (Manager) can deactivate Level 1.
         """
-        if creator.role.level < 3:
-             raise HTTPException(status_code=403, detail="Only Administrators can deactivate users.")
-
         target = db.query(User).filter(User.id == user_id, User.tenant_id == creator.tenant_id).first()
         if not target:
             return False
 
         if target.id == creator.id:
             raise HTTPException(status_code=400, detail="You cannot deactivate yourself.")
+
+        # Hierarchy Check
+        if creator.role.level < 3: # Not a super admin
+            if target.role.level >= creator.role.level:
+                raise HTTPException(
+                    status_code=403, 
+                    detail="Access denied: You can only deactivate users with a lower role level than yours."
+                )
+        
+        # Level 2 minimum required to deactivate anyone
+        if creator.role.level < 2:
+            raise HTTPException(status_code=403, detail="Sales roles cannot deactivate users.")
 
         target.is_active = False
         db.commit()

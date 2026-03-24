@@ -82,7 +82,7 @@ class ChatbotService:
         """
         session_id = chat_session.session_id
 
-        # A. Save user message
+        # A. Save user message (priority)
         session_service.save_message(db, chat_session, user_message, "user")
 
         # B. Urgent Keyword Handling (TOP PRIORITY)

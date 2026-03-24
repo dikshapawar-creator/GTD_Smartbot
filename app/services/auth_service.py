@@ -11,6 +11,7 @@ from app.core.security import (
 )
 from app.core.config import settings
 from app.services.audit_service import AuditService
+from app.services.email_service import send_reset_email
 
 import logging
 logger = logging.getLogger(__name__)
@@ -147,8 +148,10 @@ class AuthService:
             )
             db.add(db_reset)
             db.commit()
-            # MOCK EMAIL: In real app, call mailer(email, raw_token)
-            print(f"MOCK EMAIL to {email}: Reset token is {raw_token}")
+            
+            # Send actual email via SMTP
+            send_reset_email(email, raw_token)
+            
             AuditService.log_action(db, "PASSWORD_RESET_REQUESTED", user.tenant_id, actor_user_id=user.id)
         # Unknown email: silently ignore, do NOT log (no valid tenant_id)
 
