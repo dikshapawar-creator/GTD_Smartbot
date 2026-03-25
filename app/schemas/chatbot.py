@@ -58,7 +58,6 @@ class CTAObject(BaseModel):
 class SessionInitRequest(BaseModel):
     visitor_uuid: Optional[str] = None
     fingerprint: Optional[str] = None
-    tenant_id: Optional[int] = Field(None, description="The ID of the tenant/website for this session")
     metadata: Optional[dict] = Field(default_factory=dict)
 
 class SessionInitResponse(BaseModel):

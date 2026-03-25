@@ -56,12 +56,26 @@ async def send_inactivity_message(session_id: str, last_activity_timestamp: date
         if diff_seconds < 1.0: # Increased tolerance to 1s for safety
             # Prevent double-nudging
             last_msg = db.query(ChatMessage).filter(ChatMessage.session_id == chat_session.session_id).order_by(ChatMessage.created_at_utc.desc()).first()
-            if last_msg and "https://wa.me/918527376675" in (last_msg.message_text or ""):
+            from app.models.intent_config import IntentConfig
+            config = db.query(IntentConfig).filter(
+                IntentConfig.intent_key == "INACTIVITY_NUDGE",
+                IntentConfig.tenant_id == 1
+            ).first()
+            
+            inactivity_msg = config.response_text if (config and config.response_text) else (
+                "We’ve received your message and will get back to you soon.\n\n"
+                "For more details, feel free to reach us anytime:\n"
+                "💬- https://wa.me/918527376675\n"
+                "📞 WhatsApp: +91 8527376675\n\n"
+                "We’ll be happy to assist you with complete support.\n\n"
+                "WhatsApp Messenger: More than 2 billion people in over 180 countries use WhatsApp to stay in touch with friends and family, anytime and anywhere."
+            )
+            
+            # Check if the last message is already the inactivity nudge to prevent sending it multiple times
+            if last_msg and (last_msg.message_text == inactivity_msg):
                 logger.debug(f"Monitor: Nudge already sent for {session_id}.")
                 return
 
-            inactivity_msg = "We’ve received your message and will get back to you soon.\n\nFor more details, feel free to reach us anytime:\n💬 https://wa.me/918527376675\n📞 WhatsApp: +91 8527376675\n\nWe’ll be happy to assist you with complete support."
-            
             logger.info(f"Monitor: PERSISTING nudge for {chat_session.session_id}")
             
             # 1. Persist to DB

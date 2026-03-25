@@ -43,11 +43,14 @@ def create_access_token(
     email: str, 
     role_name: str, 
     role_level: int, 
-    tenant_id: int, 
+    tenant_id: int,           # Kept for backward compat — equals primary_tenant_id
     token_version: int,
+    primary_tenant_id: int = None,
+    tenant_ids: list = None,
+    is_super_admin: bool = False,
     expires_delta: Optional[timedelta] = None
 ) -> str:
-    """Create a short-lived JWT access token with full metadata."""
+    """Create a short-lived JWT access token with full multi-tenant metadata."""
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
     else:
@@ -59,7 +62,10 @@ def create_access_token(
         "email": email,
         "role": role_name,
         "role_level": role_level,
-        "tenant_id": tenant_id,
+        "tenant_id": tenant_id,                              # backward compat
+        "primary_tenant_id": primary_tenant_id or tenant_id, # new
+        "tenant_ids": tenant_ids or [tenant_id],             # new: list of accessible tenants
+        "is_super_admin": is_super_admin,                    # new: bypass flag
         "token_version": token_version,
         "jti": secrets.token_hex(16),
         "type": "access",
@@ -67,6 +73,14 @@ def create_access_token(
     }
     encoded_jwt = jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
     return encoded_jwt
+
+
+def decode_access_token(token: str) -> Optional[dict]:
+    """Decode and validate a JWT access token."""
+    try:
+        return jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+    except Exception:
+        return None
 
 def hash_token(token: str) -> str:
     """Harden refresh/reset tokens by storing SHA256 hashes."""

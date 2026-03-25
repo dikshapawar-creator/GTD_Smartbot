@@ -3,7 +3,7 @@ ChatMessage model — stores every individual chat message under a session.
 Optimized with indexing for fast retrieval and history pagination.
 """
 from sqlalchemy import (
-    Column, BigInteger, String, Text, DateTime, ForeignKey, Index
+    Column, BigInteger, String, Text, DateTime, ForeignKey, Index, Integer
 )
 from app.db.session import Base
 
@@ -12,6 +12,7 @@ class ChatMessage(Base):
     __tablename__ = "chat_messages"
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, default=1, index=True)
 
     # FK references chat_sessions.session_id (String UUID)
     session_id = Column(String(36), nullable=False, index=True)

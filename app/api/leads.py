@@ -81,18 +81,22 @@ async def submit_lead(
         # 1. Get Session & Tenant (if possible)
         session_id = request.cookies.get(settings.SESSION_COOKIE_NAME)
         chat_session = None
-        current_tenant_id = settings.DEFAULT_TENANT_ID 
+        current_tenant_id = request.state.tenant_id or settings.DEFAULT_TENANT_ID
 
         # Priority 1: Use visitor_uuid from body
         if lead_req.visitor_uuid:
             chat_session = db.query(ChatSession).filter(
                 ChatSession.visitor_uuid == lead_req.visitor_uuid,
+                ChatSession.tenant_id == current_tenant_id,
                 ChatSession.is_deleted == False
             ).order_by(ChatSession.last_activity_utc.desc()).first()
         
         # Priority 2: Fallback to session_id cookie if visitor_uuid didn't find anything
         if not chat_session and session_id and is_valid_uuid(session_id):
-            chat_session = db.query(ChatSession).filter(ChatSession.session_id == session_id).first()
+            chat_session = db.query(ChatSession).filter(
+                ChatSession.session_id == session_id,
+                ChatSession.tenant_id == current_tenant_id
+            ).first()
 
         if chat_session:
             current_tenant_id = chat_session.tenant_id
@@ -160,6 +164,7 @@ async def submit_lead(
             
             system_msg = ChatMessage(
                 session_id=chat_session.session_id,
+                tenant_id=chat_session.tenant_id,  # 🧪 CRITICAL: Link message to session's tenant
                 message_text=json.dumps(form_data),
                 message_type="form",
                 created_at_utc=datetime.now(timezone.utc),
@@ -177,7 +182,21 @@ async def submit_lead(
             # Broadcast to global dashboard pool
             await socket_manager.broadcast_event(
                 "SESSION_UPDATED", 
-                session_item
+                session_item,
+                tenant_id=current_tenant_id
+            )
+
+            # 🔥 Broadcast LEAD_CREATED to CRM Leads Tab
+            await socket_manager.broadcast_event(
+                "LEAD_CREATED",
+                {
+                    "id": str(lead.id),
+                    "full_name": lead.name,
+                    "email": lead.email,
+                    "status": lead.status,
+                    "created_at": lead.created_at.isoformat()
+                },
+                tenant_id=current_tenant_id
             )
             
             # 🚀 DIRECT NOTIFICATION: Send specifically to the agent handling this session
@@ -307,7 +326,7 @@ def get_lead(
 
 
 @router.patch("/{id}/status", response_model=LeadResponse, summary="Update lead status (controlled)")
-def update_lead_status(
+async def update_lead_status(
     id: UUID, 
     update_req: StatusUpdateRequest, 
     db: Session = Depends(get_db),
@@ -326,6 +345,19 @@ def update_lead_status(
             source=update_req.source,
             expected_version=update_req.version
         )
+
+        # 🔥 Broadcast to CRM Dashboard
+        from app.core.socket_manager import socket_manager
+        await socket_manager.broadcast_event(
+            "LEAD_UPDATED",
+            {
+                "id": str(id),
+                "status": update_req.status,
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            },
+            tenant_id=current_user.tenant_id
+        )
+
         return updated_lead
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -361,7 +393,10 @@ def get_conversations(
     return (
         db.query(ChatMessage)
         .join(ChatSession, ChatSession.session_id == ChatMessage.session_id)
-        .filter(ChatSession.lead_id == str(leadId))
+        .filter(
+            ChatSession.lead_id == str(leadId),
+            ChatMessage.tenant_id == current_user.tenant_id
+        )
         .order_by(ChatMessage.created_at_utc.asc())
         .all()
     )
@@ -369,7 +404,7 @@ def get_conversations(
 
 
 @router.delete("/{id}", summary="Soft delete a lead")
-def delete_lead(
+async def delete_lead(
     id: UUID, 
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(2))
@@ -380,6 +415,15 @@ def delete_lead(
     success = lead_service.soft_delete_lead(db, str(id), tenant_id=current_user.tenant_id)
     if not success:
         raise HTTPException(status_code=404, detail="Lead not found")
+    
+    # 🔥 Broadcast to CRM Dashboard
+    from app.core.socket_manager import socket_manager
+    await socket_manager.broadcast_event(
+        "LEAD_DELETED",
+        {"id": str(id)},
+        tenant_id=current_user.tenant_id
+    )
+
     return {"status": "success", "message": "Lead soft-deleted"}
 
 

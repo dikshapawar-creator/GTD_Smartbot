@@ -4,7 +4,7 @@ from typing import Optional, Tuple
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, status
 
-from app.models.auth import User, Role, Tenant, RefreshToken, PasswordReset
+from app.models.auth import User, Role, Tenant, RefreshToken, PasswordReset, UserTenant
 from app.core.security import (
     get_password_hash, verify_password, hash_token,
     create_access_token, secure_compare
@@ -85,18 +85,37 @@ class AuthService:
 
     @staticmethod
     def create_session(db: Session, user: User) -> Tuple[str, str]:
+        # Fetch active tenant mappings from user_tenants
+        utrows = db.query(UserTenant).filter(
+            UserTenant.user_id == user.id,
+            UserTenant.status == True
+        ).all()
+
+        if utrows:
+            tenant_ids = [r.tenant_id for r in utrows]
+            primary_row = next((r for r in utrows if r.is_primary), utrows[0])
+            primary_tenant_id = primary_row.tenant_id
+        else:
+            # Backward compat: no user_tenants rows → use users.tenant_id
+            tenant_ids = [user.tenant_id]
+            primary_tenant_id = user.tenant_id
+
         access_token = create_access_token(
             user_id=user.id,
             email=user.email,
             role_name=user.role.name,
             role_level=user.role.level,
             tenant_id=user.tenant_id,
-            token_version=user.token_version
+            token_version=user.token_version,
+            primary_tenant_id=primary_tenant_id,
+            tenant_ids=tenant_ids,
+            is_super_admin=getattr(user, 'is_super_admin', False)
         )
         refresh_token = secrets.token_urlsafe(64)
 
         db_token = RefreshToken(
             user_id=user.id,
+            tenant_id=user.tenant_id,
             token_hash=hash_token(refresh_token),
             expires_at=datetime.utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
         )
@@ -143,6 +162,7 @@ class AuthService:
             raw_token = secrets.token_urlsafe(32)
             db_reset = PasswordReset(
                 user_id=user.id,
+                tenant_id=user.tenant_id,
                 token_hash=hash_token(raw_token),
                 expires_at=datetime.utcnow() + timedelta(minutes=15)
             )

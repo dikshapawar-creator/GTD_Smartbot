@@ -49,6 +49,16 @@ def on_checkout(dbapi_connection, connection_record, connection_proxy):
     """Called every time a connection is checked out from the pool."""
     pass  # pool_pre_ping handles validation; this is a hook for future use
 
+def keep_alive_ping() -> bool:
+    """Check database connectivity for health checks."""
+    try:
+        with SessionLocal() as db:
+            db.execute(text("SELECT 1"))
+            return True
+    except Exception as e:
+        logger.error(f"Health Check: Database unreachable - {e}")
+        return False
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
@@ -176,19 +186,38 @@ def _ensure_tenant_id_columns(engine):
     """Adds tenant_id to leads and lead_status_history if missing."""
     try:
         with engine.begin() as conn:
-            # Leads table
-            check_leads = conn.execute(text(
-                "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'leads' AND COLUMN_NAME = 'tenant_id'"
-            )).fetchone()
-            if not check_leads:
-                logger.info("Database: Adding tenant_id to leads...")
-                conn.execute(text("ALTER TABLE leads ADD tenant_id INT NOT NULL DEFAULT 1"))
-                try:
-                    conn.execute(text("CREATE INDEX ix_leads_tenant_id ON leads(tenant_id)"))
-                except Exception as e:
-                    logger.warning(f"Database: Could not create index on leads(tenant_id): {e}")
+            # 1. Tenants table metadata
+            for col, col_type in [("api_key", "NVARCHAR(255)"), ("domain", "NVARCHAR(255)")]:
+                check_col = conn.execute(text(
+                    f"SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'tenants' AND COLUMN_NAME = '{col}'"
+                )).fetchone()
+                if not check_col:
+                    logger.info(f"Database: Adding {col} to tenants...")
+                    conn.execute(text(f"ALTER TABLE tenants ADD {col} {col_type} NULL"))
+                    try:
+                        conn.execute(text(f"CREATE UNIQUE INDEX ux_tenants_{col} ON tenants({col}) WHERE {col} IS NOT NULL"))
+                    except Exception as e:
+                        logger.warning(f"Database: Could not create unique index on tenants({col}): {e}")
 
-            # Leads session_id column (Lead <-> Chat linkage)
+            # 2. Add tenant_id to all target tables
+            target_tables = [
+                "leads", "lead_status_history", "chat_sessions", "chat_messages", 
+                "intent_configs", "blocked_visitors", "roles", "refresh_tokens", "password_resets"
+            ]
+            for table in target_tables:
+                check_tenant = conn.execute(text(
+                    f"SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{table}' AND COLUMN_NAME = 'tenant_id'"
+                )).fetchone()
+                if not check_tenant:
+                    logger.info(f"Database: Adding tenant_id to {table}...")
+                    conn.execute(text(f"ALTER TABLE {table} ADD tenant_id INT NOT NULL DEFAULT 1"))
+                    try:
+                        conn.execute(text(f"CREATE INDEX ix_{table}_tenant_id ON {table}(tenant_id)"))
+                    except Exception as e:
+                        logger.warning(f"Database: Could not create index on {table}(tenant_id): {e}")
+
+            # 3. Specific table enhancements
+            # Leads session_id column
             check_session_id = conn.execute(text(
                 "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'leads' AND COLUMN_NAME = 'session_id'"
             )).fetchone()
@@ -199,18 +228,6 @@ def _ensure_tenant_id_columns(engine):
                     conn.execute(text("CREATE INDEX ix_leads_session_id ON leads(session_id)"))
                 except Exception as e:
                     logger.warning(f"Database: Could not create index on leads(session_id): {e}")
-
-            # Lead status history table
-            check_history = conn.execute(text(
-                "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'lead_status_history' AND COLUMN_NAME = 'tenant_id'"
-            )).fetchone()
-            if not check_history:
-                logger.info("Database: Adding tenant_id to lead_status_history...")
-                conn.execute(text("ALTER TABLE lead_status_history ADD tenant_id INT NOT NULL DEFAULT 1"))
-                try:
-                    conn.execute(text("CREATE INDEX ix_lead_status_history_tenant_id ON lead_status_history(tenant_id)"))
-                except Exception as e:
-                    logger.warning(f"Database: Could not create index on lead_status_history(tenant_id): {e}")
 
             # 4. token_version column for JWT invalidation (users table)
             check_token_version = conn.execute(text(
@@ -223,13 +240,11 @@ def _ensure_tenant_id_columns(engine):
                 # Ensure no NULLs in existing token_version column
                 conn.execute(text("UPDATE users SET token_version = 1 WHERE token_version IS NULL"))
 
-            # 5. Data Migration: Ensure consistency (Temporary fix for transition)
-            # Migrate any leads where tenant_id != DEFAULT_TENANT_ID if we are in a single-tenant assumed mode
-            # Or just ensure all current leads are on tenant 1 for this specific user.
-            conn.execute(text(f"UPDATE leads SET tenant_id = {settings.DEFAULT_TENANT_ID} WHERE tenant_id IS NULL OR tenant_id != {settings.DEFAULT_TENANT_ID}"))
-            conn.execute(text(f"UPDATE lead_status_history SET tenant_id = {settings.DEFAULT_TENANT_ID} WHERE tenant_id IS NULL OR tenant_id != {settings.DEFAULT_TENANT_ID}"))
+            # 5. Data Migration: Ensure consistency
+            for table in target_tables:
+                 conn.execute(text(f"UPDATE {table} SET tenant_id = {settings.DEFAULT_TENANT_ID} WHERE tenant_id IS NULL OR tenant_id = 0"))
             
-            # 8. is_lead column for chat_sessions (Lead <-> Chat linkage)
+            # 6. Chat session enrichment columns
             check_is_lead = conn.execute(text(
                 "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'chat_sessions' AND COLUMN_NAME = 'is_lead'"
             )).fetchone()
@@ -237,7 +252,14 @@ def _ensure_tenant_id_columns(engine):
                 logger.info("Database: Adding is_lead to chat_sessions...")
                 conn.execute(text("ALTER TABLE chat_sessions ADD is_lead BIT NOT NULL DEFAULT 0"))
 
-            # Lead Details columns for chat_sessions
+            # 6.5 IntentConfig is_active column
+            check_is_active = conn.execute(text(
+                "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'intent_configs' AND COLUMN_NAME = 'is_active'"
+            )).fetchone()
+            if not check_is_active:
+                logger.info("Database: Adding is_active to intent_configs...")
+                conn.execute(text("ALTER TABLE intent_configs ADD is_active BIT NOT NULL DEFAULT 1"))
+
             for col, col_type in [
                 ("lead_name", "NVARCHAR(255)"),
                 ("lead_email", "NVARCHAR(255)"),
@@ -251,12 +273,29 @@ def _ensure_tenant_id_columns(engine):
                     logger.info(f"Database: Adding {col} to chat_sessions...")
                     conn.execute(text(f"ALTER TABLE chat_sessions ADD {col} {col_type} NULL"))
 
-            # 6. Global Re-login (Force users to get new tenant IDs and stable secrets)
-            # Only run this once relative to this fix (we can use a specific check if needed, 
-            # but usually incrementing once is safe in this dev transition)
-            # We'll check if any user has token_version < 2 (since our target is 2 or more)
-            # Force increment token_version to 5 to be absolutely sure it happens now
+            # 7. Seed Default Tenant API Key if missing
+            default_tenant = conn.execute(text(f"SELECT id FROM tenants WHERE id = {settings.DEFAULT_TENANT_ID}")).fetchone()
+            if default_tenant:
+                conn.execute(text(f"UPDATE tenants SET api_key = 'tenant_abc123', domain = 'localhost' WHERE id = {settings.DEFAULT_TENANT_ID} AND api_key IS NULL"))
+
+            # 8. Force Global Re-login
             conn.execute(text("UPDATE users SET token_version = 5 WHERE token_version < 5"))
+
+            # 9. Bot Config Branding Cleanup & Logo Sync (High-Fidelity Avatar)
+            logger.info("Database: cleaning up bot_config branding and syncing logos...")
+            # We use the specific high-fidelity logo uploaded today for tenant 2 as the new standard
+            logo_path = "/static/logos/chatbot_logo_2_67e79328.png"
+            conn.execute(text(f"""
+                UPDATE bot_config 
+                SET chatbot_name = 'GTD Support',
+                    chatbot_logo_url = '{logo_path}',
+                    fab_tooltip = 'Trade Support',
+                    welcome_text = 'Welcome to GTD Service.',
+                    primary_color = '#2563eb',
+                    secondary_color = '#1e40af',
+                    font_family = 'Inter, sans-serif'
+                WHERE tenant_id IS NOT NULL
+            """))
 
             # 7. Session ID/UUID mismatch is handled at runtime in live_chat.py and ws_chat.py
             # (Migration blocked by FK constraint from chat_messages → chat_sessions.session_id)

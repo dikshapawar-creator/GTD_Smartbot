@@ -5,62 +5,171 @@ from typing import List
 from app.core.dependencies import get_db
 from app.models.intent_config import IntentConfig
 from app.schemas.intents import IntentConfigCreate, IntentConfigRead, IntentConfigUpdate
+from app.api.deps import require_role
+from app.models.auth import User
 
 router = APIRouter(prefix="/intents", tags=["Intent Management"])
 
 @router.get("/", response_model=List[IntentConfigRead])
-def list_intents(db: Session = Depends(get_db)):
-    """List all intent configurations."""
-    return db.query(IntentConfig).all()
+def list_intents(
+    tenant_id: int = None,
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(require_role(2))
+):
+    """List all intent configurations. Super-Admins can specify a tenant_id."""
+    target_tenant_id = current_user.tenant_id
+    if current_user.is_super_admin and tenant_id:
+        target_tenant_id = tenant_id
+    
+    return db.query(IntentConfig).filter(IntentConfig.tenant_id == target_tenant_id).all()
 
 @router.get("/{intent_key}", response_model=IntentConfigRead)
-def get_intent(intent_key: str, db: Session = Depends(get_db)):
-    """Retrieve a specific intent by its unique key."""
-    intent = db.query(IntentConfig).filter(IntentConfig.intent_key == intent_key).first()
+def get_intent(
+    intent_key: str, 
+    tenant_id: int = None,
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(require_role(2))
+):
+    """Retrieve a specific intent. Super-Admins can specify a tenant_id."""
+    target_tenant_id = current_user.tenant_id
+    if current_user.is_super_admin and tenant_id:
+        target_tenant_id = tenant_id
+
+    intent = db.query(IntentConfig).filter(
+        IntentConfig.intent_key == intent_key,
+        IntentConfig.tenant_id == target_tenant_id
+    ).first()
     if not intent:
         raise HTTPException(status_code=404, detail=f"Intent '{intent_key}' not found")
     return intent
 
 @router.post("/", response_model=IntentConfigRead, status_code=status.HTTP_201_CREATED)
-def create_intent(intent_in: IntentConfigCreate, db: Session = Depends(get_db)):
-    """Create a new intent configuration."""
-    existing = db.query(IntentConfig).filter(IntentConfig.intent_key == intent_in.intent_key).first()
+async def create_intent(
+    intent_in: IntentConfigCreate, 
+    tenant_id: int = None,
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(require_role(2))
+):
+    """Create a new intent configuration. Super-Admins can specify a tenant_id."""
+    target_tenant_id = current_user.tenant_id
+    if current_user.is_super_admin and tenant_id:
+        target_tenant_id = tenant_id
+
+    existing = db.query(IntentConfig).filter(
+        IntentConfig.intent_key == intent_in.intent_key,
+        IntentConfig.tenant_id == target_tenant_id
+    ).first()
     if existing:
-        raise HTTPException(status_code=400, detail=f"Intent '{intent_in.intent_key}' already exists")
+        raise HTTPException(status_code=400, detail=f"Intent '{intent_in.intent_key}' already exists for this tenant")
     
     intent = IntentConfig(
         intent_key=intent_in.intent_key,
         keywords=intent_in.keywords,
         response_text=intent_in.response_text,
-        metadata_json=intent_in.metadata_json
+        metadata_json=intent_in.metadata_json,
+        tenant_id=target_tenant_id
     )
     db.add(intent)
     db.commit()
     db.refresh(intent)
+
+    # 🔥 Broadcast to CRM Dashboard
+    from app.core.socket_manager import socket_manager
+    await socket_manager.broadcast_event(
+        "INTENT_CREATED",
+        {
+            "id": intent.id,
+            "intent_key": intent.intent_key,
+            "intent_name": intent.intent_key # IntentConfig doesn't have intent_name, using key
+        },
+        tenant_id=target_tenant_id
+    )
+
     return intent
 
 @router.patch("/{intent_key}", response_model=IntentConfigRead)
-def update_intent(intent_key: str, intent_in: IntentConfigUpdate, db: Session = Depends(get_db)):
-    """Update an existing intent configuration."""
-    intent = db.query(IntentConfig).filter(IntentConfig.intent_key == intent_key).first()
+async def update_intent(
+    intent_key: str, 
+    intent_in: IntentConfigUpdate, 
+    tenant_id: int = None,
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(require_role(2))
+):
+    """Update an existing intent. Super-Admins can specify a tenant_id."""
+    target_tenant_id = current_user.tenant_id
+    if current_user.is_super_admin and tenant_id:
+        target_tenant_id = tenant_id
+
+    intent = db.query(IntentConfig).filter(
+        IntentConfig.intent_key == intent_key,
+        IntentConfig.tenant_id == target_tenant_id
+    ).first()
     if not intent:
         raise HTTPException(status_code=404, detail=f"Intent '{intent_key}' not found")
     
     update_data = intent_in.model_dump(exclude_unset=True)
+    
+    # Uniqueness check for intent_key rename
+    if "intent_key" in update_data and update_data["intent_key"] != intent.intent_key:
+        collision = db.query(IntentConfig).filter(
+            IntentConfig.intent_key == update_data["intent_key"],
+            IntentConfig.tenant_id == target_tenant_id
+        ).first()
+        if collision:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Intent key '{update_data['intent_key']}' already exists for this tenant."
+            )
+
     for field, value in update_data.items():
         setattr(intent, field, value)
     
     db.commit()
     db.refresh(intent)
+
+    # 🔥 Broadcast to CRM Dashboard
+    from app.core.socket_manager import socket_manager
+    await socket_manager.broadcast_event(
+        "INTENT_UPDATED",
+        {
+            "id": intent.id,
+            "intent_key": intent.intent_key,
+            "intent_name": intent.intent_key
+        },
+        tenant_id=target_tenant_id
+    )
+
     return intent
 
 @router.delete("/{intent_key}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_intent(intent_key: str, db: Session = Depends(get_db)):
-    """Delete an intent configuration."""
-    intent = db.query(IntentConfig).filter(IntentConfig.intent_key == intent_key).first()
+async def delete_intent(
+    intent_key: str, 
+    tenant_id: int = None,
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(require_role(2))
+):
+    """Delete an intent. Super-Admins can specify a tenant_id."""
+    target_tenant_id = current_user.tenant_id
+    if current_user.is_super_admin and tenant_id:
+        target_tenant_id = tenant_id
+
+    intent = db.query(IntentConfig).filter(
+        IntentConfig.intent_key == intent_key,
+        IntentConfig.tenant_id == target_tenant_id
+    ).first()
     if not intent:
         raise HTTPException(status_code=404, detail=f"Intent '{intent_key}' not found")
     
+    intent_id = intent.id
     db.delete(intent)
     db.commit()
+
+    # 🔥 Broadcast to CRM Dashboard
+    from app.core.socket_manager import socket_manager
+    await socket_manager.broadcast_event(
+        "INTENT_DELETED",
+        {"id": intent_id, "intent_key": intent_key},
+        tenant_id=target_tenant_id
+    )
+
     return None

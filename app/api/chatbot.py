@@ -33,7 +33,7 @@ async def initialize_session(request: Request, response: Response, background_ta
     session_id = request.cookies.get(settings.SESSION_COOKIE_NAME)
     
     if session_id:
-        active_session = session_service.get_active_session(db, session_id)
+        active_session = session_service.get_active_session(db, session_id, request.state.tenant_id)
         # Verify session is truly active and exists
         if active_session and active_session.session_status == SessionStatus.ACTIVE:
             return {
@@ -57,7 +57,8 @@ async def initialize_session(request: Request, response: Response, background_ta
     # 🚨 SECURITY: Blocked Visitor Check
     is_blocked = db.query(BlockedVisitor).filter(
         (BlockedVisitor.ip_address == client_ip) | 
-        (BlockedVisitor.visitor_fingerprint == fingerprint)
+        (BlockedVisitor.visitor_fingerprint == fingerprint),
+        BlockedVisitor.tenant_id == request.state.tenant_id  # ← Isolated
     ).first()
     
     if is_blocked:
@@ -95,7 +96,7 @@ async def initialize_session(request: Request, response: Response, background_ta
         
         # 🔥 ENTERPRISE: Consolidate any duplicate sessions first
         from app.api.live_chat import consolidate_visitor_sessions
-        existing_session = consolidate_visitor_sessions(db, visitor_uuid_ext)
+        existing_session = consolidate_visitor_sessions(db, visitor_uuid_ext, request.state.tenant_id)
         
         if existing_session:
             logger.info(f"[SESSION_INIT] REUSING existing session {existing_session.session_id} for visitor {visitor_uuid_ext}")
@@ -110,9 +111,10 @@ async def initialize_session(request: Request, response: Response, background_ta
             # 2. If no active session, check for ANY prior history to flag as returning
             # AND carry over their Lead ID if they have one
             prior_session = db.query(ChatSession).filter(
-                ChatSession.visitor_uuid == visitor_uuid_ext,
-                ChatSession.total_messages > 0,
-                ChatSession.is_deleted == False
+            ChatSession.visitor_uuid == visitor_uuid_ext,
+            ChatSession.total_messages > 0,
+            ChatSession.tenant_id == request.state.tenant_id,
+            ChatSession.is_deleted == False
             ).order_by(ChatSession.started_at_utc.desc()).first()
             
             if prior_session:
@@ -120,9 +122,10 @@ async def initialize_session(request: Request, response: Response, background_ta
                 logger.info(f"[SESSION_INIT] Found prior session history for visitor {visitor_uuid_ext}")
                 # Check for lead id in any of their past sessions
                 session_with_lead = db.query(ChatSession).filter(
-                    ChatSession.visitor_uuid == visitor_uuid_ext,
-                    ChatSession.lead_id.isnot(None),
-                    ChatSession.is_deleted == False
+                ChatSession.visitor_uuid == visitor_uuid_ext,
+                ChatSession.lead_id.isnot(None),
+                ChatSession.tenant_id == request.state.tenant_id,
+                ChatSession.is_deleted == False
                 ).order_by(ChatSession.started_at_utc.desc()).first()
                 
                 if session_with_lead:
@@ -133,9 +136,8 @@ async def initialize_session(request: Request, response: Response, background_ta
 
     if not existing_session:
         logger.info(f"[SESSION_INIT] Creating NEW session for visitor {visitor_uuid_ext}")
-        # Use tenant_id from request if available, otherwise default
-        requested_tenant_id = (init_req.tenant_id if init_req and init_req.tenant_id 
-                             else settings.DEFAULT_TENANT_ID)
+        # Use tenant_id from request state (set by middleware)
+        requested_tenant_id = request.state.tenant_id or settings.DEFAULT_TENANT_ID
         
         new_session = session_service.create_session(
             db, 
@@ -148,7 +150,7 @@ async def initialize_session(request: Request, response: Response, background_ta
             os_name=meta["os"],
             device_type=meta["device_type"],
             fingerprint=fingerprint,
-            tenant_id=requested_tenant_id,
+            tenant_id=request.state.tenant_id or requested_tenant_id,
             visitor_uuid=visitor_uuid_ext,
             lead_id=carry_over_lead_id # 🔥 Identity Retention
         )
@@ -164,7 +166,8 @@ async def initialize_session(request: Request, response: Response, background_ta
     session_item = format_session_for_crm(new_session)
     await socket_manager.broadcast_event(
         "NEW_CONVERSATION", 
-        session_item
+        session_item,
+        tenant_id=new_session.tenant_id  # ← Isolated
     )
 
     # Fetch professional greeting from DB for consistency
@@ -230,7 +233,7 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
 
     # 🔧 FIX: The session_id we get might be a visitor_uuid from the bearer token
     try:
-        active_session = session_service.get_active_session(db, session_id)
+        active_session = session_service.get_active_session(db, session_id, request.state.tenant_id)
         if not active_session:
             raise HTTPException(status_code=401, detail="Invalid or expired session.")
     except ValueError as e:
@@ -272,7 +275,8 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
                 "message": msg_req.message,
                 "sender": "user",
                 "timestamp": datetime.now(timezone.utc).isoformat()
-            }
+            },
+            tenant_id=active_session.tenant_id  # ← Isolated
         )
 
         return {
@@ -323,7 +327,7 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
         # Placeholder for smart sales alert
         print(f"🔥 HOT LEAD DETECTED: Session {active_session.session_id}")
 
-    intent_key = intent_service.detect_intent(db, translated_message)
+    intent_key = intent_service.detect_intent(db, translated_message, active_session.tenant_id)
     current_state = active_session.chat_state
     bot_msg = ""
     
@@ -348,7 +352,8 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
                 "message": user_message,
                 "sender": "user",
                 "timestamp": datetime.now(timezone.utc).isoformat()
-            }
+            },
+            tenant_id=active_session.tenant_id  # ← Isolated
         )
         await socket_manager.broadcast_event(
             "NEW_MESSAGE",
@@ -357,7 +362,8 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
                 "message": bot_msg,
                 "sender": "bot",
                 "timestamp": datetime.now(timezone.utc).isoformat()
-            }
+            },
+            tenant_id=active_session.tenant_id  # ← Isolated
         )
         
         return {
@@ -379,7 +385,8 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
                 "message": user_message,
                 "sender": "user",
                 "timestamp": datetime.utcnow().isoformat()
-            }
+            },
+            tenant_id=active_session.tenant_id  # ← Isolated
         )
         await socket_manager.broadcast_event(
             "NEW_MESSAGE",
@@ -388,7 +395,8 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
                 "message": bot_message,
                 "sender": "bot",
                 "timestamp": datetime.now(timezone.utc).isoformat()
-            }
+            },
+            tenant_id=active_session.tenant_id  # ← Isolated
         )
         
         # If lead was updated, broadcast session update
@@ -397,7 +405,8 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
             session_item = format_session_for_crm(active_session)
             await socket_manager.broadcast_event(
                 "SESSION_UPDATED", 
-                session_item
+                session_item,
+                tenant_id=active_session.tenant_id  # ← Isolated
             )
         
         return response_data
@@ -474,7 +483,7 @@ async def get_chat_history(request: Request, db: Session = Depends(get_db)):
     if not session_id:
         return []
 
-    active_session = session_service.get_active_session(db, session_id)
+    active_session = session_service.get_active_session(db, session_id, request.state.tenant_id)
     if not active_session:
         return []
 
@@ -532,7 +541,7 @@ async def get_chat_history(request: Request, db: Session = Depends(get_db)):
 async def end_session(request: Request, response: Response, db: Session = Depends(get_db)):
     session_id = request.cookies.get(settings.SESSION_COOKIE_NAME)
     if session_id:
-        session_service.close_session(db, session_id)
+        session_service.close_session(db, session_id, request.state.tenant_id)
     response.delete_cookie(settings.SESSION_COOKIE_NAME)
     return {"status": "success"}
 

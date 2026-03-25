@@ -28,7 +28,7 @@ class IntentType(Enum):
     API_ACCESS_REQUEST = "API_ACCESS_REQUEST"
     UNKNOWN = "UNKNOWN"
 
-def detect_intent(db: Session, message: str) -> str:
+def detect_intent(db: Session, message: str, tenant_id: int) -> str:
     """
     Detects user intent using dynamic configuration from the database.
     Returns the intent_key string.
@@ -53,60 +53,49 @@ def detect_intent(db: Session, message: str) -> str:
     # 2. Dynamic DB-based Detection (PRIMARY)
     from app.models.intent_config import IntentConfig
     
-    try:
-        all_configs = db.query(IntentConfig).all()
-        logger.info(f"Dynamic Intent Check: Found {len(all_configs)} configs in DB")
-    except Exception as e:
-        logger.error(f"Error querying IntentConfig: {e}")
-        all_configs = []
+    def fetch_best_match(target_id: int) -> tuple:
+        try:
+            configs = db.query(IntentConfig).filter(
+                IntentConfig.tenant_id == target_id,
+                IntentConfig.is_active == True
+            ).all()
+            match = None
+            max_len = 0
+            import json
+            for config in configs:
+                keywords = config.keywords
+                if not keywords: continue
+                
+                # Robust parsing: handle JSON-list strings OR comma-separated strings
+                if isinstance(keywords, str):
+                    keywords_str = keywords.strip()
+                    if keywords_str.startswith("[") and keywords_str.endswith("]"):
+                        try:
+                            keywords = json.loads(keywords_str)
+                        except:
+                            keywords = [k.strip() for k in keywords_str.split(",")]
+                    else:
+                        keywords = [k.strip() for k in keywords_str.split(",")]
+                
+                if not isinstance(keywords, list):
+                    continue
 
-    best_match = None
-    longest_kw_len = 0
+                for kw in keywords:
+                    kw = kw.lower().strip()
+                    if kw and kw in message and len(kw) > max_len:
+                        max_len = len(kw)
+                        match = config.intent_key
+            return match, max_len
+        except Exception as e:
+            logger.error(f"Error querying IntentConfig for tenant {target_id}: {e}")
+            return None, 0
 
-    for config in all_configs:
-        keywords = config.keywords # List from JSON
-        if not keywords: continue
-        
-        # Support both List and comma-separated string for keywords
-        if isinstance(keywords, str):
-            keywords = [k.strip() for k in keywords.split(",")]
-            
-        for kw in keywords:
-            kw = kw.lower().strip()
-            if not kw: continue
-            
-            # Check for substring match (prioritize longer phrases for specificity)
-            if kw in message:
-                logger.debug(f"Keyword match found: '{kw}' for intent '{config.intent_key}'")
-                if len(kw) > longest_kw_len:
-                    longest_kw_len = len(kw)
-                    best_match = config.intent_key
+    # Force detection via GTD Service (Tenant 1) patterns for exact flow synchronization
+    best_match, longest_kw_len = fetch_best_match(1)
 
     if best_match:
         logger.info(f"Best DB match: {best_match} (len={longest_kw_len})")
         return best_match
-
-    # 3. Fallback to Hardcoded logic (Strictly for missing DB config)
-    # Reordered to check specific intents BEFORE generic ones like IMPORT_EXPORT
-    priority_fallbacks = [
-        ("GREETING", ["hi", "hello", "hey", "hii", "greetings", "good morning"]),
-        ("BUYER_SEARCH", ["buyer", "buyers", "find buyers", "who buys", "buyer list"]),
-        ("SUPPLIER_SEARCH", ["supplier", "suppliers", "find suppliers", "who sells", "supplier list"]),
-        ("HS_CODE_SEARCH", ["hs code", "hsn code", "tariff", "classification"]),
-        ("COMPETITOR_ANALYSIS", ["competitor", "competition", "compete", "benchmark"]),
-        ("SHIPMENT_RECORDS", ["records", "shipment details", "bill of lading", "manifest"]),
-        ("COUNTRY_TRADE_ANALYSIS", ["country analysis", "trade by country", "global trade", "bilateral trade data"]),
-        ("PRODUCT_MARKET_RESEARCH", ["market research", "demand", "product research"]),
-        ("PRICING_INQUIRY", ["price", "cost", "pricing", "subscription", "fees", "how much"]),
-        ("REQUEST_DEMO", ["book demo", "schedule demo", "request demo", "trial"]),
-        ("LEAD_COLLECTION", ["contact me", "callback", "call back", "reach out"]),
-        ("DEMO", ["demo", "show me", "tutorial"]),
-        ("IMPORT_EXPORT", ["import", "export", "trade", "importing", "exporting"]), # Generic LAST
-    ]
-
-    for intent_key, keywords in priority_fallbacks:
-        if any(kw in message for kw in keywords):
-            return intent_key
 
     return "UNKNOWN"
 

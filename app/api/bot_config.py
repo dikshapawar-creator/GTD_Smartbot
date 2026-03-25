@@ -2,7 +2,7 @@ import os
 import uuid
 import logging
 from typing import Optional
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.core.dependencies import get_db
@@ -25,12 +25,19 @@ def _get_or_create_config(db: Session, tenant_id: int) -> BotConfig:
     """Get existing config or create default for tenant."""
     config = db.query(BotConfig).filter(BotConfig.tenant_id == tenant_id).first()
     if not config:
+        # Ensure static/logo.png or better exists
+        # We start with the universal high-fidelity avatar uploaded today
+        default_logo = "/static/logos/chatbot_logo_2_67e79328.png"
+        
         config = BotConfig(
             tenant_id=tenant_id,
             chatbot_name="GTD Support",
-            chatbot_logo_url="/logo.png",
+            chatbot_logo_url=default_logo,
             fab_tooltip="Trade Support",
-            welcome_text="Welcome to GTD Service."
+            welcome_text="Welcome to GTD Service.",
+            primary_color="#2563eb",
+            secondary_color="#1e40af",
+            font_family="'Inter', sans-serif"
         )
         db.add(config)
         db.commit()
@@ -40,34 +47,32 @@ def _get_or_create_config(db: Session, tenant_id: int) -> BotConfig:
 
 @router.get("/bot-config", response_model=BotConfigResponse)
 def get_bot_config(
-    tenant_id: Optional[int] = None,
+    request: Request,
     db: Session = Depends(get_db)
 ):
     """
     Public endpoint to fetch chatbot branding configuration.
-    Accepts tenant_id to support multiple websites.
+    Tenant is identified via API key, JWT, or domain in middleware.
     """
-    target_tenant_id = tenant_id if tenant_id is not None else settings.DEFAULT_TENANT_ID
+    target_tenant_id = request.state.tenant_id or settings.DEFAULT_TENANT_ID
     logger.info(f"Fetching bot config for tenant: {target_tenant_id}")
     
-    config = db.query(BotConfig).filter(BotConfig.tenant_id == target_tenant_id).first()
-    if not config:
-        # Fallback to default tenant if specific one not found
-        config = db.query(BotConfig).filter(BotConfig.tenant_id == settings.DEFAULT_TENANT_ID).first()
-        
-    if not config:
-        raise HTTPException(status_code=404, detail="Bot configuration not found")
+    # Use helper to ensure a config exists (with defaults if new)
+    config = _get_or_create_config(db, target_tenant_id)
     return BotConfigResponse.model_validate(config)
 
 
 @router.put("/admin/bot-config", response_model=BotConfigResponse)
 def update_bot_config(
     payload: BotConfigUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(2))
 ):
     """Admin-only: Update chatbot name, logo URL, tooltip, or welcome text."""
-    config = _get_or_create_config(db, current_user.tenant_id)
+    # Use request context if available, otherwise fallback to user's primary
+    target_tenant_id = request.state.tenant_id or current_user.tenant_id
+    config = _get_or_create_config(db, target_tenant_id)
 
     update_data = payload.model_dump(exclude_unset=True)
     for field, value in update_data.items():
@@ -81,6 +86,7 @@ def update_bot_config(
 
 @router.post("/admin/bot-config/upload-logo")
 async def upload_bot_logo(
+    request: Request,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(2))
@@ -103,7 +109,9 @@ async def upload_bot_logo(
 
     # Update config with the served URL
     logo_url = f"/static/logos/{filename}"
-    config = _get_or_create_config(db, current_user.tenant_id)
+    # Use request context if available, otherwise fallback to user's primary
+    target_tenant_id = request.state.tenant_id or current_user.tenant_id
+    config = _get_or_create_config(db, target_tenant_id)
     config.chatbot_logo_url = logo_url
     db.commit()
     db.refresh(config)

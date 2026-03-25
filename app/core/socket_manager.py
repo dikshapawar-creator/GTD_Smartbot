@@ -7,55 +7,68 @@ logger = logging.getLogger(__name__)
 class WebSocketManager:
     """
     Centralized manager for real-time CRM updates.
-    Handles broadcasting session state changes to all connected agent dashboards.
+    Handles broadcasting session state changes to tenant-specific agent dashboards.
     """
     def __init__(self):
-        # active_connections[user_id] = Set[WebSocket]
-        self.active_connections: Dict[int, Set[WebSocket]] = {}
-        # broadcast_rooms: global subscription for CRM dashboard
-        self.broadcast_pool: Set[WebSocket] = set()
+        # tenant_connections[tenant_id] = Set[WebSocket]
+        self.tenant_connections: Dict[int, Set[WebSocket]] = {}
+        # user_connections[user_id] = Set[WebSocket] (for direct messages)
+        self.user_connections: Dict[int, Set[WebSocket]] = {}
 
-    async def connect(self, websocket: WebSocket, user_id: int):
-        if user_id not in self.active_connections:
-            self.active_connections[user_id] = set()
-        self.active_connections[user_id].add(websocket)
-        self.broadcast_pool.add(websocket)
-        logger.debug(f"WebSocket connected for user {user_id}. Pool size: {len(self.broadcast_pool)}")
+    async def connect(self, websocket: WebSocket, user_id: int, tenant_id: int):
+        # Register for tenant-wide broadcasts
+        if tenant_id not in self.tenant_connections:
+            self.tenant_connections[tenant_id] = set()
+        self.tenant_connections[tenant_id].add(websocket)
 
-    def disconnect(self, websocket: WebSocket, user_id: int):
-        if user_id in self.active_connections:
-            self.active_connections[user_id].remove(websocket)
-            if not self.active_connections[user_id]:
-                del self.active_connections[user_id]
-        if websocket in self.broadcast_pool:
-            self.broadcast_pool.remove(websocket)
-        logger.debug(f"WebSocket disconnected for user {user_id}. Pool size: {len(self.broadcast_pool)}")
+        # Register for user-specific messages
+        if user_id not in self.user_connections:
+            self.user_connections[user_id] = set()
+        self.user_connections[user_id].add(websocket)
+        
+        logger.debug(f"WS connected: user={user_id}, tenant={tenant_id}")
 
-    async def broadcast_event(self, event_type: str, data: Any):
-        """Broadcasts an event to all connected dashboard clients."""
-        if not self.broadcast_pool:
+    def disconnect(self, websocket: WebSocket, user_id: int, tenant_id: int):
+        if tenant_id in self.tenant_connections:
+            self.tenant_connections[tenant_id].discard(websocket)
+            if not self.tenant_connections[tenant_id]:
+                self.tenant_connections.pop(tenant_id, None)
+        
+        if user_id in self.user_connections:
+            self.user_connections[user_id].discard(websocket)
+            if not self.user_connections[user_id]:
+                self.user_connections.pop(user_id, None)
+        
+        logger.debug(f"WS disconnected: user={user_id}, tenant={tenant_id}")
+
+    async def broadcast_event(self, event_type: str, data: Any, tenant_id: int = None):
+        """Broadcasts an event to connected dashboard clients, optionally scoped by tenant."""
+        target_pool = set()
+        
+        if tenant_id:
+            target_pool = self.tenant_connections.get(tenant_id, set())
+        else:
+            # Fallback: broadcast to ALL (use with caution, mostly for system updates)
+            for pool in self.tenant_connections.values():
+                target_pool.update(pool)
+
+        if not target_pool:
             return
 
-        if isinstance(data, dict):
-            payload = {"type": event_type, **data}
-        else:
-            payload = {
-                "type": event_type,
-                "data": data
-            }
+        payload = {"type": event_type, **(data if isinstance(data, dict) else {"data": data})}
         
-        # Create a copy of the pool to iterate over to avoid modification errors
         dead_connections = set()
-        for connection in self.broadcast_pool:
+        for connection in list(target_pool):
             try:
                 await connection.send_json(payload)
             except Exception as e:
-                logger.error(f"Failed to broadcast to connection: {e}")
+                logger.error(f"Failed to broadcast: {e}")
                 dead_connections.add(connection)
         
-        # Cleanup stale connections
-        for dead in dead_connections:
-            self.broadcast_pool.remove(dead)
+        # Cleanup
+        if tenant_id and tenant_id in self.tenant_connections:
+            for dead in dead_connections:
+                self.tenant_connections[tenant_id].discard(dead)
 
 # Global Instance
 socket_manager = WebSocketManager()

@@ -12,8 +12,9 @@ logger = logging.getLogger(__name__)
 
 
 class SessionService:
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, tenant_id: int = None):
         self.db = db
+        self.tenant_id = tenant_id
 
     def create_or_resume_session(
         self,
@@ -38,7 +39,8 @@ class SessionService:
                 and_(
                     ChatSession.visitor_uuid == visitor_uuid,
                     ChatSession.session_status.in_([SessionStatus.ACTIVE]),
-                    ChatSession.last_activity_at >= cutoff
+                    ChatSession.last_activity_at >= cutoff,
+                    ChatSession.tenant_id == self.tenant_id if self.tenant_id else ChatSession.tenant_id
                 )
             )
             .order_by(ChatSession.created_at.desc())
@@ -67,6 +69,7 @@ class SessionService:
         session_suffix = hashlib.sha256(
             f"{fingerprint}{datetime.utcnow().isoformat()}".encode()
         ).hexdigest()[:7]
+        session_id = f"session_{session_suffix}"
         
         now = datetime.utcnow()
         session = ChatSession(
@@ -75,6 +78,7 @@ class SessionService:
             session_status=SessionStatus.ACTIVE,
             current_mode=ConversationMode.BOT,
             conversation_mode=ConversationMode.BOT,  # Keep for compatibility
+            tenant_id=self.tenant_id or 1,
             created_at=now,
             started_at_utc=now,
             started_at_local=now,
@@ -110,7 +114,10 @@ class SessionService:
         Updates session with lead form data and proper display name.
         Called when visitor submits lead form through bot.
         """
-        session = self.db.get(ChatSession, session_id)
+        session = self.db.query(ChatSession).filter(
+            ChatSession.session_id == session_id,
+            ChatSession.tenant_id == (self.tenant_id if hasattr(self, 'tenant_id') else ChatSession.tenant_id)
+        ).first()
         if not session:
             raise ValueError(f"Session {session_id} not found")
         
@@ -176,7 +183,10 @@ class SessionService:
 
     def agent_takeover(self, session_id: str, agent_name: str) -> ChatSession:
         """Handle agent takeover of bot conversation."""
-        session = self.db.get(ChatSession, session_id)
+        session = self.db.query(ChatSession).filter(
+            ChatSession.session_id == session_id,
+            ChatSession.tenant_id == (self.tenant_id if hasattr(self, 'tenant_id') else ChatSession.tenant_id)
+        ).first()
         if not session:
             raise ValueError(f"Session {session_id} not found")
         
@@ -195,11 +205,10 @@ class SessionService:
 
     def end_session(self, session_id: str) -> ChatSession:
         """End a chat session."""
-        session = self.db.get(ChatSession, session_id)
-        if not session:
-            # Fallback for string-based custom ID lookup if PK retrieval fails
-            if isinstance(session_id, str) and not session_id.isdigit():
-                 session = self.db.query(ChatSession).filter(ChatSession.session_id == session_id).first()
+        session = self.db.query(ChatSession).filter(
+            ChatSession.session_id == session_id,
+            ChatSession.tenant_id == (self.tenant_id if hasattr(self, 'tenant_id') else ChatSession.tenant_id)
+        ).first()
             
         if not session:
             raise ValueError(f"Session {session_id} not found")
@@ -218,7 +227,7 @@ class SessionService:
 
     def _calculate_lead_score(self, lead_data: dict) -> int:
         """Calculate lead score based on form completeness and content."""
-        score = 0
+        score: int = 0
         
         # Base score for form submission
         score += 20
@@ -258,7 +267,7 @@ class SessionService:
         return f"Visitor #{session.visitor_uuid[-6:].upper()}"
 
 # Module-level functions for backward compatibility
-def get_active_session(db: Session, session_id: str) -> Optional[ChatSession]:
+def get_active_session(db: Session, session_id: str, tenant_id: int = None) -> Optional[ChatSession]:
     """Get active session by session_id (UUID). Module-level function for backward compatibility."""
     from sqlalchemy import select, and_
     
@@ -269,7 +278,8 @@ def get_active_session(db: Session, session_id: str) -> Optional[ChatSession]:
             .where(
                 and_(
                     ChatSession.visitor_uuid == session_id,
-                    ChatSession.session_status == SessionStatus.ACTIVE
+                    ChatSession.session_status == SessionStatus.ACTIVE,
+                    ChatSession.tenant_id == tenant_id
                 )
             )
             .order_by(ChatSession.last_activity_at.desc())
@@ -287,7 +297,8 @@ def get_active_session(db: Session, session_id: str) -> Optional[ChatSession]:
             .where(
                 and_(
                     ChatSession.session_id == session_id,
-                    ChatSession.session_status == SessionStatus.ACTIVE
+                    ChatSession.session_status == SessionStatus.ACTIVE,
+                    ChatSession.tenant_id == tenant_id
                 )
             )
             .order_by(ChatSession.last_activity_at.desc())
@@ -353,9 +364,7 @@ def create_session(
         os=os_name,
         device_type=device_type,
         visitor_fingerprint=fingerprint,
-        tenant_id=tenant_id or 1,  # Default tenant_id
-        lead_id=lead_id,
-        is_active=True,
+        tenant_id=tenant_id or 1,
         message_count=0
     )
     
@@ -381,6 +390,7 @@ def save_message(db: Session, session: ChatSession, message_text: str, message_t
     
     message = ChatMessage(
         session_id=session.session_id,  # Use session_id (string) not id (BigInteger)
+        tenant_id=session.tenant_id,   # 🧪 CRITICAL: Link message to session's tenant
         message_type=message_type,
         message_text=message_text,
         created_at=now,
@@ -406,11 +416,11 @@ def update_chat_state(db: Session, session: ChatSession, new_state: str) -> None
     session.chat_state = str(new_state).upper()
     db.commit()
 
-def close_session(db: Session, session_id: str) -> bool:
+def close_session(db: Session, session_id: str, tenant_id: int = None) -> bool:
     """Close a session by session_id (synchronous version for backward compatibility)."""
     try:
         # Try to find by visitor_uuid first
-        session = get_active_session(db, session_id)
+        session = get_active_session(db, session_id, tenant_id)
         
         if session:
             session.session_status = SessionStatus.CLOSED

@@ -55,15 +55,24 @@ async def get_current_user(
         
     if user.token_version != token_version:
         raise HTTPException(status_code=401, detail="Session expired. Please login again.")
+
+    # Attach JWT claims to user object for use in middleware/deps
+    user._jwt_tenant_ids = payload.get("tenant_ids", [user.tenant_id])
+    user._jwt_primary_tenant_id = payload.get("primary_tenant_id", user.tenant_id)
+    user._jwt_is_super_admin = payload.get("is_super_admin", False)
         
     return user
 
 def require_role(min_level: int):
     """
     Enforce numeric role hierarchy.
+    Super admins bypass all level checks.
     Usage: Depends(require_role(2)) # Requires Admin or higher
     """
     async def role_checker(current_user: User = Depends(get_current_user)):
+        # Super admins bypass all role checks
+        if getattr(current_user, '_jwt_is_super_admin', False) or getattr(current_user, 'is_super_admin', False):
+            return current_user
         if current_user.role.level < min_level:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -71,3 +80,16 @@ def require_role(min_level: int):
             )
         return current_user
     return role_checker
+
+async def require_super_admin(current_user: User = Depends(get_current_user)) -> User:
+    """Dependency: only users with is_super_admin=True can call this endpoint."""
+    is_super = (
+        getattr(current_user, 'is_super_admin', False) or
+        getattr(current_user, '_jwt_is_super_admin', False)
+    )
+    if not is_super:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Super Admin access required."
+        )
+    return current_user

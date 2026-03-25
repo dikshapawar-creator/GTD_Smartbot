@@ -14,10 +14,14 @@ def handle_greeting(db: Session, chat_session: ChatSession) -> dict:
     Handles a greeting message using the template stored in intent_configs.
     """
     # Fetch response from DB
-    config = db.query(IntentConfig).filter(IntentConfig.intent_key == "GREETING").first()
-    
-    # Fallback to hardcoded if not in DB (safety)
-    response_text = config.response_text if config else "Hello! Welcome to GTD Service. How can I assist you today?"
+    # Force professional greeting (pinned to GTD Service / Tenant 1 flow)
+    config = db.query(IntentConfig).filter(
+        IntentConfig.intent_key == "GREETING",
+        IntentConfig.tenant_id == 1
+    ).first()
+
+    # Fallback to generic if still not in DB
+    response_text = config.response_text if (config and config.response_text) else "Hello! How can I help you today?"
     
     from app.services import session_service
     if not chat_session.has_greeted:

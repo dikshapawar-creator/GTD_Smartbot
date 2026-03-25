@@ -11,7 +11,7 @@ class LiveChatSocketManager:
     def __init__(self):
         self.agent_rooms: Dict[str, List[str]] = {}  # workspace_id -> [session_ids]
         
-    async def notify_new_session(self, session, workspace_id: str):
+    async def notify_new_session(self, session, tenant_id: int):
         """Notify agents of new visitor session via existing WebSocket manager."""
         # Get IP metadata safely
         ip_meta = session.ip_metadata_dict
@@ -47,10 +47,10 @@ class LiveChatSocketManager:
             "lead_insights": getattr(session, 'lead_insights', None),
         }
         
-        # Broadcast to all connected agents using existing WebSocket manager
-        await self._broadcast_to_dashboard(session_data)
+        # Broadcast to all connected agents for THIS tenant
+        await self._broadcast_to_dashboard(session_data, tenant_id=tenant_id)
 
-    async def notify_session_updated(self, session, workspace_id: str):
+    async def notify_session_updated(self, session, tenant_id: int):
         """Notify agents of session updates."""
         # Get IP metadata safely
         ip_meta = session.ip_metadata_dict
@@ -77,9 +77,9 @@ class LiveChatSocketManager:
             "lead_insights": getattr(session, 'lead_insights', None),
         }
         
-        await self._broadcast_to_dashboard(session_data)
+        await self._broadcast_to_dashboard(session_data, tenant_id=tenant_id)
 
-    async def notify_lead_form_submitted(self, session, lead_data: dict, workspace_id: str):
+    async def notify_lead_form_submitted(self, session, lead_data: dict, tenant_id: int):
         """Notify agents when visitor submits lead form."""
         await self._broadcast_to_dashboard({
             'type': 'LEAD_FORM_SUBMITTED',
@@ -93,9 +93,9 @@ class LiveChatSocketManager:
                 'company': lead_data.get('company'),
                 'submittedAt': format_ist_time(datetime.utcnow())
             }
-        })
+        }, tenant_id=tenant_id)
 
-    async def notify_message(self, message, session, workspace_id: str):
+    async def notify_message(self, message, session, tenant_id: int):
         """Notify agents of new message."""
         message_data = {
             'type': 'NEW_MESSAGE',
@@ -107,23 +107,21 @@ class LiveChatSocketManager:
             'created_at_ist': format_ist_datetime(message.created_at),
         }
         
-        await self._broadcast_to_dashboard(message_data)
+        await self._broadcast_to_dashboard(message_data, tenant_id=tenant_id)
 
-    async def notify_typing(self, visitor_uuid: str, is_typing: bool, workspace_id: str):
+    async def notify_typing(self, visitor_uuid: str, is_typing: bool, tenant_id: int):
         """Notify agents of typing status."""
         await self._broadcast_to_dashboard({
             'type': 'TYPING_STATUS',
             'session_id': visitor_uuid,
             'is_typing': is_typing
-        })
+        }, tenant_id=tenant_id)
 
-    async def _broadcast_to_dashboard(self, data: dict):
-        """Broadcast data to dashboard using existing WebSocket infrastructure."""
-        # For now, we'll use the existing socket_manager broadcast
-        # This integrates with your existing WebSocket system
+    async def _broadcast_to_dashboard(self, data: dict, tenant_id: int = None):
+        """Broadcast data to dashboard using tenant-aware WebSocket infrastructure."""
         try:
             from app.core.socket_manager import socket_manager
-            await socket_manager.broadcast_event(data.get("type", "UPDATE"), data)
+            await socket_manager.broadcast_event(data.get("type", "UPDATE"), data, tenant_id=tenant_id)
         except Exception as e:
             print(f"Dashboard broadcast failed: {e}")
             # Continue without WebSocket - REST API still works

@@ -111,7 +111,10 @@ def create_or_update_lead(
     session_lead = None
     if session_id:
         from app.models.chat_session import ChatSession
-        session = db.query(ChatSession).filter(ChatSession.session_id == session_id).first()
+        session = db.query(ChatSession).filter(
+            ChatSession.session_id == session_id,
+            ChatSession.tenant_id == tenant_id
+        ).first()
         if session and session.lead_id:
             session_lead = db.query(Lead).filter(
                 Lead.id == session.lead_id,

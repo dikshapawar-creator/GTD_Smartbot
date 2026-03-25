@@ -15,22 +15,33 @@ from app.services.intent_service import detect_intent, IntentType
 
 logger = logging.getLogger(__name__)
 
-THANK_YOU_MESSAGE = """Thank you. We will arrange a call for you shortly.
-
-You can discuss all your questions with our team during the meeting.
-
-Regarding your data and requirements, our team will provide you with the appropriate solution."""
-
-STATE_QUESTIONS = {
-    ChatState.START: "Welcome! Are you interested in Import or Export?",
-    ChatState.TRADE_TYPE: "To provide you with the most accurate trade data for your region, please Book a Demo with our experts.",
-    ChatState.COUNTRY: "Our database covers 80+ countries. Please use the form below to select your target market and get started.",
-    ChatState.PRODUCT: "Great choice! To get detailed insights on this product, please Book a Demo with our experts.",
-    ChatState.COMPLETE: "Is there anything else I can help you with?",
-    ChatState.ENDED: THANK_YOU_MESSAGE
-}
+from app.models.intent_config import IntentConfig
 
 class ChatbotService:
+    @staticmethod
+    def _get_dynamic_response(db: Session, intent_key: str, default: str) -> str:
+        """Helper to fetch responses from Tenant 1 (GTD Service) to avoid hardcoding."""
+        config = db.query(IntentConfig).filter(
+            IntentConfig.intent_key == intent_key,
+            IntentConfig.tenant_id == 1,
+            IntentConfig.is_active == True
+        ).first()
+        return config.response_text if (config and config.response_text) else default
+
+    @staticmethod
+    def get_state_question(db: Session, state: ChatState) -> str:
+        """Dynamic replacement for hardcoded STATE_QUESTIONS."""
+        state_map = {
+            ChatState.START: ("WELCOME_QUESTION", "Welcome! Are you interested in Import or Export?"),
+            ChatState.TRADE_TYPE: ("TRADE_TYPE_QUESTION", "To provide you with the most accurate trade data for your region, please Book a Demo with our experts."),
+            ChatState.COUNTRY: ("COUNTRY_QUESTION", "Our database covers 80+ countries. Please use the form below to select your target market and get started."),
+            ChatState.PRODUCT: ("PRODUCT_QUESTION", "Great choice! To get detailed insights on this product, please Book a Demo with our experts."),
+            ChatState.COMPLETE: ("EXTRA_HELP_QUESTION", "Is there anything else I can help you with?"),
+            ChatState.ENDED: ("FALLBACK_GENERIC", "Thank you. We will arrange a call for you shortly.")
+        }
+        key, default = state_map.get(state, ("UNKNOWN", "How can I help you?"))
+        return ChatbotService._get_dynamic_response(db, key, default)
+
     @staticmethod
     def _clean_bot_response(text: str) -> str:
         """
@@ -87,57 +98,36 @@ class ChatbotService:
 
         # B. Urgent Keyword Handling (TOP PRIORITY)
         if ChatbotService.check_urgent(user_message):
-            urgent_msg = """We understand your request is urgent.
-
-For immediate assistance, please contact us on WhatsApp:
-💬 https://wa.me/918527376675
-📞 +91 8527376675
-
-Our team will assist you quickly."""
+            urgent_msg = ChatbotService._get_dynamic_response(
+                db, 
+                "URGENT_SUPPORT", 
+                "We understand your request is urgent. For immediate assistance, please contact us on WhatsApp: +91 8527376675"
+            )
             session_service.save_message(db, chat_session, urgent_msg, "bot")
             session_service.update_chat_state(db, chat_session, ChatState.COMPLETE)
             return {
                 "message": urgent_msg,
-                "state": ChatState.COMPLETE,
+                "state": ChatState.COMPLETE.value,
                 "type": "MESSAGE",
                 "intent": "urgent"
             }
 
         # C. Intent Detection (Dynamic)
-        intent_key = detect_intent(db, user_message)
-        logger.info(f"Detected intent: {intent_key} for session {session_id}")
+        intent_key = detect_intent(db, user_message, chat_session.tenant_id)
+        logger.info(f"Detected intent: {intent_key} for session {session_id} (Tenant {chat_session.tenant_id})")
 
         intent_response = None
         
-        # Check for specialized intent in DB first
+        # Force specialized intent from GTD Service (Tenant 1) for exact flow sync
         from app.models.intent_config import IntentConfig
-        config = db.query(IntentConfig).filter(IntentConfig.intent_key == intent_key).first()
+        config = db.query(IntentConfig).filter(
+            IntentConfig.intent_key == intent_key,
+            IntentConfig.tenant_id == 1,
+            IntentConfig.is_active == True
+        ).first()
         if config and config.response_text:
             intent_response = config.response_text
         
-        # Hardcoded High-Value Fallbacks (if DB is empty)
-        if not intent_response:
-            fallback_map = {
-                "GREETING": "Hello! I'm your GTT Trade Assistant. How can I help you explore global trade today?",
-                "IMPORT_EXPORT": "We provide comprehensive data for both Import and Export. Which one country are you looking for?",
-                "BUYER_SEARCH": "We have detailed records of 20M+ buyers across 80+ countries. Are you looking for buyers for a specific product?",
-                "SUPPLIER_SEARCH": "Our database includes millions of verified global suppliers. Looking for a supplier in a specific region?",
-                "HS_CODE_SEARCH": "I can help you find HS Codes and tariff details for any product. What are you looking for?",
-                "COMPETITOR_ANALYSIS": "Want to track what your competitors are shipping? We provide real-time competitor intelligence.",
-                "SHIPMENT_RECORDS": "We provide detailed bill of lading and manifest data for 80+ countries. Want to see a sample?",
-                "COUNTRY_TRADE_ANALYSIS": "We have in-depth trade reports for almost every country. Which region interests you?",
-                "PRODUCT_MARKET_RESEARCH": "Get insights into global demand and supply trends for your products. Tell me the product name!",
-                "PRICING_INQUIRY": "We have flexible plans for every business size. Please use the demo form below to discuss the best pricing for your needs.",
-                "REQUEST_DEMO": THANK_YOU_MESSAGE,
-                "LEAD_COLLECTION": THANK_YOU_MESSAGE,
-                "SALES_DEMO": THANK_YOU_MESSAGE,
-                "DEMO": THANK_YOU_MESSAGE,
-                "HANDOFF": "I'll connect you with an expert. In the meantime, feel free to book a demo for a priority consultation.",
-                "DATA_PROVIDER_DATASOURCE": "We collaborate with data providers who can supply import-export or customs trade data.\nIf you are interested in selling or साझेदारी, please share your company details and type of data you can provide.",
-                "API_ACCESS_REQUEST": "We offer API access for seamless integration of trade data into your system.\nPlease share your use case and technical requirements, and our team will assist you with API details and access."
-            }
-            intent_response = fallback_map.get(intent_key)
-
         if intent_response and intent_key != "UNKNOWN":
             logger.info(f"Intent response found (Source: {'DB' if config else 'Hardcoded'}): {intent_key}")
             # Intent found -> Reset fallback sentinel if it was set
@@ -196,7 +186,11 @@ Our team will assist you quickly."""
             }
         
         # First fallback -> Standardized message
-        fallback_msg = THANK_YOU_MESSAGE
+        fallback_msg = ChatbotService._get_dynamic_response(
+            db, 
+            "FALLBACK_GENERIC", 
+            "Thank you. We will arrange a call for you shortly.\n\nYou can discuss all your questions with our team during the meeting.\n\nRegarding your data and requirements, our team will provide you with the appropriate solution."
+        )
         
         session_service.update_chat_state(db, chat_session, ChatState.FALLBACK.value)
         session_service.save_message(db, chat_session, fallback_msg, "bot")

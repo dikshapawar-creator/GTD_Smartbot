@@ -15,11 +15,11 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/live-chat", tags=["live-chat"])
 
-def get_active_sessions_sync(db: Session) -> List[ChatSession]:
+def get_active_sessions_sync(db: Session, tenant_id: int) -> List[ChatSession]:
     """Get all active sessions for the live chat dashboard (synchronous version)."""
     from app.services.session_service import SessionService
     session_service = SessionService(db)
-    return session_service.get_active_sessions()
+    return session_service.get_active_sessions(tenant_id=tenant_id)
 
 
 @router.get("/conversations")
@@ -28,7 +28,7 @@ async def get_conversations(
     current_user = Depends(get_current_user)
 ):
     """Get all active conversations for the live chat dashboard."""
-    sessions = get_active_sessions_sync(db)
+    sessions = get_active_sessions_sync(db, tenant_id=current_user.tenant_id)
     
     # Convert to frontend format
     conversations = []
@@ -78,7 +78,7 @@ async def get_analytics(
     current_user = Depends(get_current_user)
 ):
     """Get live chat analytics."""
-    sessions = get_active_sessions_sync(db)
+    sessions = get_active_sessions_sync(db, tenant_id=current_user.tenant_id)
     
     active_visitors = len([s for s in sessions if s.session_status == SessionStatus.ACTIVE])
     agent_chats = len([s for s in sessions if s.current_mode == ConversationMode.HUMAN])
@@ -112,6 +112,7 @@ async def get_messages(
         .where(
             and_(
                 ChatSession.visitor_uuid == session_uuid,
+                ChatSession.tenant_id == current_user.tenant_id,
                 ChatSession.session_status.in_([SessionStatus.ACTIVE, SessionStatus.CLOSED])  # Include closed sessions for message history
             )
         )
@@ -132,6 +133,7 @@ async def get_messages(
         .where(
             and_(
                 ChatSession.visitor_uuid == session.visitor_uuid,
+                ChatSession.tenant_id == current_user.tenant_id,
                 ChatSession.is_deleted == False
             )
         )
@@ -172,6 +174,7 @@ async def intervene_session(
         .where(
             and_(
                 ChatSession.visitor_uuid == session_uuid,
+                ChatSession.tenant_id == current_user.tenant_id,
                 ChatSession.session_status.in_(["ACTIVE", "BOT"])
             )
         )
@@ -201,7 +204,7 @@ async def intervene_session(
     try:
         socket_manager = get_live_chat_socket()
         if socket_manager:
-            await socket_manager.notify_session_updated(session, "default")
+            await socket_manager.notify_session_updated(session, session.tenant_id)
     except Exception as e:
         print(f"WebSocket notification failed: {e}")
         # Continue without WebSocket - REST API still works
@@ -261,7 +264,7 @@ async def send_message(
     try:
         socket_manager = get_live_chat_socket()
         if socket_manager:
-            await socket_manager.notify_message(message, session, "default")
+            await socket_manager.notify_message(message, session, session.tenant_id)
     except Exception as e:
         print(f"WebSocket notification failed: {e}")
         # Continue without WebSocket - REST API still works
@@ -311,7 +314,7 @@ async def close_session(
     try:
         socket_manager = get_live_chat_socket()
         if socket_manager:
-            await socket_manager.notify_session_updated(session, "default")
+            await socket_manager.notify_session_updated(session, session.tenant_id)
     except Exception as e:
         print(f"WebSocket notification failed: {e}")
         # Continue without WebSocket - REST API still works
@@ -356,7 +359,7 @@ async def toggle_priority(
     try:
         socket_manager = get_live_chat_socket()
         if socket_manager:
-            await socket_manager.notify_session_updated(session, "default")
+            await socket_manager.notify_session_updated(session, session.tenant_id)
     except Exception as e:
         print(f"WebSocket notification failed: {e}")
         # Continue without WebSocket - REST API still works
@@ -400,7 +403,7 @@ async def toggle_spam(
     try:
         socket_manager = get_live_chat_socket()
         if socket_manager:
-            await socket_manager.notify_session_updated(session, "default")
+            await socket_manager.notify_session_updated(session, session.tenant_id)
     except Exception as e:
         print(f"WebSocket notification failed: {e}")
         # Continue without WebSocket - REST API still works
@@ -446,7 +449,7 @@ async def block_visitor(
     try:
         socket_manager = get_live_chat_socket()
         if socket_manager:
-            await socket_manager.notify_session_updated(session, "default")
+            await socket_manager.notify_session_updated(session, session.tenant_id)
     except Exception as e:
         print(f"WebSocket notification failed: {e}")
         # Continue without WebSocket - REST API still works
@@ -572,7 +575,7 @@ async def cleanup_empty_sessions_endpoint(
         raise HTTPException(status_code=500, detail=f"Cleanup failed: {str(e)}")
 
 
-def consolidate_visitor_sessions(db: Session, visitor_uuid: str) -> Optional[ChatSession]:
+def consolidate_visitor_sessions(db: Session, visitor_uuid: str, tenant_id: int) -> Optional[ChatSession]:
     """
     Consolidate duplicate sessions for a visitor and return the most recent active session.
     This prevents duplicate queue cards in the live chat dashboard.
@@ -585,6 +588,7 @@ def consolidate_visitor_sessions(db: Session, visitor_uuid: str) -> Optional[Cha
         select(ChatSession)
         .where(
             ChatSession.visitor_uuid == visitor_uuid,
+            ChatSession.tenant_id == tenant_id,
             ChatSession.session_status == SessionStatus.ACTIVE
         )
         .order_by(ChatSession.created_at.desc())
@@ -701,9 +705,11 @@ async def get_session_detail(
     logger = logging.getLogger(__name__)
     logger.info(f"Looking for session with UUID: {session_uuid}")
     
-    # Find by session_id/visitor_uuid
     stmt = select(ChatSession).where(
-        (ChatSession.visitor_uuid == session_uuid) | (ChatSession.session_id == session_uuid)
+        and_(
+            (ChatSession.visitor_uuid == session_uuid) | (ChatSession.session_id == session_uuid),
+            ChatSession.tenant_id == current_user.tenant_id
+        )
     )
     result = db.execute(stmt)
     session = result.scalars().first()
@@ -726,7 +732,8 @@ async def update_lead(
     """Manually update lead data for a session from CRM."""
     from sqlalchemy import select, or_
     stmt = select(ChatSession).where(
-        (ChatSession.visitor_uuid == session_uuid) | (ChatSession.session_id == session_uuid)
+        ((ChatSession.visitor_uuid == session_uuid) | (ChatSession.session_id == session_uuid)),
+        ChatSession.tenant_id == current_user.tenant_id
     )
     result = db.execute(stmt)
     session = result.scalars().first()
@@ -755,7 +762,7 @@ async def update_lead(
     try:
         socket_manager = get_live_chat_socket()
         if socket_manager:
-            await socket_manager.notify_session_updated(session, "default")
+            await socket_manager.notify_session_updated(session, session.tenant_id)
     except Exception:
         pass
         

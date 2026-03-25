@@ -30,6 +30,70 @@ router = APIRouter(prefix="/live-chat", tags=["WebSocket"])
 legacy_router = APIRouter(tags=["Legacy WebSocket"]) # No prefix
 
 
+@router.websocket("/ws/crm/updates")
+async def websocket_crm_updates(
+    websocket: WebSocket,
+    token: str = Query(...),
+):
+    """
+    Global WebSocket for CRM dashboard updates (Intents, Leads, Users).
+    SECURITY: Enforces tenant isolation via JWT.
+    """
+    await websocket.accept()
+    db = _get_db_session()
+    
+    try:
+        # ── Secure JWT Validation ──
+        try:
+            payload = jwt.decode(
+                token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM]
+            )
+            agent_id = int(payload.get("sub"))
+            token_version = payload.get("token_version")
+            if not agent_id or token_version is None:
+                raise JWTError()
+        except (JWTError, ValueError):
+            await websocket.close(code=4001, reason="Invalid authentication token")
+            return
+
+        # Verify agent exists and is active
+        agent = db.query(User).filter(User.id == agent_id).first()
+        if not agent or not agent.is_active or agent.token_version != token_version:
+            await websocket.close(code=4003, reason="Account restricted or session expired")
+            return
+
+        user_tenant_id = agent.tenant_id
+        
+        # Register with core socket manager for tenant broadcasts
+        from app.core.socket_manager import socket_manager
+        await socket_manager.connect(websocket, agent_id, user_tenant_id)
+        
+        logger.info(f"✅ [WS_CRM] Agent {agent_id} connected for tenant {user_tenant_id}")
+        
+        # Keepalive loop
+        while True:
+            data = await websocket.receive_text()
+            try:
+                parsed = json.loads(data)
+                if parsed.get("type") == "ping":
+                    await websocket.send_json({
+                        "type": "pong",
+                        "server_time_utc": datetime.now(timezone.utc).isoformat()
+                    })
+            except json.JSONDecodeError:
+                pass
+
+    except WebSocketDisconnect:
+        logger.info(f"ℹ️ [WS_CRM] Agent disconnected")
+    except Exception as e:
+        logger.error(f"❌ [WS_CRM] Global error: {e}")
+    finally:
+        if 'agent_id' in locals() and 'user_tenant_id' in locals():
+            from app.core.socket_manager import socket_manager
+            socket_manager.disconnect(websocket, agent_id, user_tenant_id)
+        db.close()
+
+
 def _get_db_session() -> DBSession:
     """Create a standalone DB session for WebSocket handlers."""
     return SessionLocal()
@@ -164,7 +228,10 @@ async def websocket_chat(
                 await websocket.close(code=4003, reason="Another agent is handling this session")
                 return
 
+            # Register with both managers
             await manager.connect_agent(session_id, websocket)
+            from app.core.socket_manager import socket_manager
+            await socket_manager.connect(websocket, agent_id, user_tenant_id)
 
         else:
             await websocket.close(code=4000, reason="Invalid role specified")
@@ -233,7 +300,8 @@ async def websocket_chat(
                             "message": text,
                             "sender": "user",
                             "timestamp": datetime.now(timezone.utc).isoformat()
-                        }
+                        },
+                        tenant_id=user_tenant_id  # ← Isolated
                     )
 
                     # ✅ ALWAYS re-fetch session mode from DB to avoid stale cache
@@ -285,7 +353,8 @@ async def websocket_chat(
                             "message": text,
                             "sender": "agent",
                             "timestamp": datetime.now(timezone.utc).isoformat()
-                        }
+                        },
+                        tenant_id=user_tenant_id  # ← Isolated
                     )
 
                     # 🔧 ENHANCED LOGGING: Debug message routing
@@ -317,10 +386,15 @@ async def websocket_chat(
             manager.disconnect_client(session_id)
         elif role == "agent":
             manager.disconnect_agent(session_id)
-            
-            # Enterprise behavior: do NOT revert status or send handoff message on disconnect.
-            # Only clicking 'End Chat' in the CRM triggers the handoff.
-            logger.info({"event": "agent_ws_detached", "session_id": session_id})
+            try:
+                from app.core.socket_manager import socket_manager
+                # Note: agent_id might not be in scope if authentication failed early, 
+                # but it's okay because we handle that in the auth block.
+                # Here we'll use a safer disconnect if possible or just rely on local cleanup.
+                if 'agent_id' in locals():
+                    socket_manager.disconnect(websocket, agent_id, user_tenant_id)
+            except Exception:
+                pass
 
         db.close()
 

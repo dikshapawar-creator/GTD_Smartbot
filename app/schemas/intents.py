@@ -6,14 +6,17 @@ class IntentConfigBase(BaseModel):
     keywords: List[str] = Field(..., description="List of keywords to trigger this intent")
     response_text: Optional[str] = Field(None, max_length=1000, description="The response text for this intent")
     metadata_json: Optional[dict] = Field(None, description="Additional metadata for the intent (e.g., CTA actions)")
+    is_active: bool = Field(True, description="Whether this intent is active")
 
 class IntentConfigCreate(IntentConfigBase):
     pass
 
 class IntentConfigUpdate(BaseModel):
+    intent_key: Optional[str] = None
     keywords: Optional[List[str]] = None
     response_text: Optional[str] = None
     metadata_json: Optional[dict] = None
+    is_active: Optional[bool] = None
 
 class IntentConfigRead(IntentConfigBase):
     id: int
