@@ -104,7 +104,12 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(request: Request, exc: RequestValidationError):
-        return _JSONResponse(status_code=422, content={"success": False, "message": "Invalid request data.", "errors": exc.errors()})
+        from fastapi.encoders import jsonable_encoder
+        try:
+            errors = jsonable_encoder(exc.errors())
+        except Exception:
+            errors = str(exc)
+        return _JSONResponse(status_code=422, content={"success": False, "message": "Invalid request data.", "errors": errors})
 
     @app.exception_handler(Exception)
     async def global_exception_handler(request: Request, exc: Exception):
