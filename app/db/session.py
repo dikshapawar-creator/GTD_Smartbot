@@ -135,6 +135,7 @@ def init_db():
         from app.models.blocked import BlockedVisitor
         from app.models.auth import User, Role, Tenant, RefreshToken, PasswordReset, AuditLog
         from app.models.bot_config import BotConfig
+        from app.models.email_config import EmailConfig
 
         logger.info("Database: Initialization started...")
 
@@ -165,6 +166,33 @@ def init_db():
             _session.close()
         except Exception as e:
             logger.warning(f"Database: BotConfig seeding skipped — {e}")
+
+        # 2.6 Seed default EmailConfig for the default tenant if missing
+        try:
+            _session = SessionLocal()
+            existing_email = _session.query(EmailConfig).filter(
+                EmailConfig.tenant_id == settings.DEFAULT_TENANT_ID
+            ).first()
+            if not existing_email:
+                from app.services.email_service import CONFIRMATION_EMAIL_TEMPLATE, RESET_PASSWORD_EMAIL_TEMPLATE
+                _session.add(EmailConfig(
+                    tenant_id=settings.DEFAULT_TENANT_ID,
+                    smtp_host=settings.SMTP_HOST,
+                    smtp_port=settings.SMTP_PORT,
+                    smtp_user=settings.SMTP_USER,
+                    smtp_password=settings.SMTP_PASSWORD,
+                    smtp_from_email=settings.SMTP_FROM_EMAIL,
+                    smtp_from_name=settings.SMTP_FROM_NAME,
+                    smtp_use_tls=settings.SMTP_USE_TLS,
+                    smtp_use_ssl=settings.SMTP_USE_SSL,
+                    confirmation_template=CONFIRMATION_EMAIL_TEMPLATE,
+                    reset_password_template=RESET_PASSWORD_EMAIL_TEMPLATE
+                ))
+                _session.commit()
+                logger.info("Database: Seeded default EmailConfig.")
+            _session.close()
+        except Exception as e:
+            logger.warning(f"Database: EmailConfig seeding skipped — {e}")
         
         # 3. Hot-fix: Ensure tenant_id columns exist (SQL Server)
         _ensure_tenant_id_columns(engine)

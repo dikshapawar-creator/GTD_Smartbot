@@ -183,98 +183,149 @@ CONFIRMATION_EMAIL_TEMPLATE = """
 </html>
 """
 
-def send_confirmation_email(recipient_email: str, name: str, product: str = "General Inquiry", country: str = "Not Specified"):
-    """
-    Sends a styled HTML confirmation email to the lead.
-    """
-    if not settings.SMTP_USER or not settings.SMTP_PASSWORD:
-        logger.warning("SMTP credentials not configured. Skipping email.")
-        return False
+def _get_smtp_server(config):
+    """Internal helper to create SMTP/SSL/TLS connection."""
+    if config.smtp_use_ssl:
+        server = smtplib.SMTP_SSL(config.smtp_host, config.smtp_port)
+    else:
+        server = smtplib.SMTP(config.smtp_host, config.smtp_port)
+        if config.smtp_use_tls:
+            server.starttls()
+    
+    import re
+    smtp_user = re.sub(r'\s+', '', config.smtp_user)
+    smtp_pass = re.sub(r'\s+', '', config.smtp_password)
+    server.login(smtp_user, smtp_pass)
+    return server
 
+def send_confirmation_email(recipient_email: str, name: str, product: str = "General Inquiry", country: str = "Not Specified", tenant_id: int = 2):
+    """
+    Sends a styled HTML confirmation email to the lead using tenant-specific config.
+    """
+    from app.db.session import SessionLocal
+    from app.models.email_config import EmailConfig
+    
+    db = SessionLocal()
     try:
-        # Prepare HTML body
-        html_body = CONFIRMATION_EMAIL_TEMPLATE.replace("{{name}}", name)
+        # 1. Fetch Tenant Specific Config
+        config = db.query(EmailConfig).filter(EmailConfig.tenant_id == tenant_id).first()
+        
+        # 2. Fallback to Env/Settings (Backward Compatibility)
+        smtp_host = config.smtp_host if config else settings.SMTP_HOST
+        smtp_port = config.smtp_port if config else settings.SMTP_PORT
+        smtp_user = config.smtp_user if config else settings.SMTP_USER
+        smtp_password = config.smtp_password if config else settings.SMTP_PASSWORD
+        smtp_from_email = config.smtp_from_email if config else settings.SMTP_FROM_EMAIL
+        smtp_from_name = config.smtp_from_name if config else settings.SMTP_FROM_NAME
+        smtp_use_tls = config.smtp_use_tls if config else settings.SMTP_USE_TLS
+        smtp_use_ssl = config.smtp_use_ssl if config else settings.SMTP_USE_SSL
+        template = (config.confirmation_template if config and config.confirmation_template 
+                   else CONFIRMATION_EMAIL_TEMPLATE)
+
+        if not smtp_user or not smtp_password:
+            logger.warning(f"SMTP credentials not configured for tenant {tenant_id}. Skipping email.")
+            return False
+
+        # 3. Prepare HTML body
+        html_body = template.replace("{{name}}", name)
         html_body = html_body.replace("{{email}}", recipient_email)
         html_body = html_body.replace("{{product}}", product or "General Inquiry")
         html_body = html_body.replace("{{country}}", country or "Not Specified")
 
-        # Create message
+        # 4. Create message
         msg = MIMEMultipart("alternative")
-        msg["Subject"] = f"Confirmation: Your Demo with {settings.SMTP_FROM_NAME}"
-        msg["From"] = f"{settings.SMTP_FROM_NAME} <{settings.SMTP_FROM_EMAIL}>"
+        msg["Subject"] = f"Confirmation: Your Demo with {smtp_from_name}"
+        msg["From"] = f"{smtp_from_name} <{smtp_from_email}>"
         msg["To"] = recipient_email
-
-        # Attach HTML part
         msg.attach(MIMEText(html_body, "html"))
 
-        # Connect and send
-        if settings.SMTP_USE_SSL:
-            server = smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT)
+        # 5. Connect and send
+        if smtp_use_ssl:
+            server = smtplib.SMTP_SSL(smtp_host, smtp_port)
         else:
-            server = smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT)
-            if settings.SMTP_USE_TLS:
+            server = smtplib.SMTP(smtp_host, smtp_port)
+            if smtp_use_tls:
                 server.starttls()
         
         import re
-        smtp_user = re.sub(r'\s+', '', settings.SMTP_USER)
-        smtp_pass = re.sub(r'\s+', '', settings.SMTP_PASSWORD)
+        user = re.sub(r'\s+', '', smtp_user)
+        pw = re.sub(r'\s+', '', smtp_password)
         
-        server.login(smtp_user, smtp_pass)
-        server.sendmail(settings.SMTP_FROM_EMAIL.strip(), recipient_email, msg.as_string())
+        server.login(user, pw)
+        server.sendmail(smtp_from_email.strip(), recipient_email, msg.as_string())
         server.quit()
 
-        logger.info(f"Confirmation email sent to {recipient_email}")
+        logger.info(f"Confirmation email sent to {recipient_email} [Tenant {tenant_id}]")
         return True
     except Exception as e:
-        logger.error(f"Failed to send confirmation email to {recipient_email}: {e}")
+        logger.error(f"Failed to send confirmation email to {recipient_email} [Tenant {tenant_id}]: {e}")
         return False
+    finally:
+        db.close()
 
-def send_reset_email(recipient_email: str, token: str):
+def send_reset_email(recipient_email: str, token: str, tenant_id: int = 2):
     """
-    Sends a password reset email with the secure token.
+    Sends a password reset email with the secure token using tenant-specific config.
     """
-    if not settings.SMTP_USER or not settings.SMTP_PASSWORD:
-        logger.warning("SMTP credentials not configured. Skipping reset email.")
-        return False
-
+    from app.db.session import SessionLocal
+    from app.models.email_config import EmailConfig
+    
+    db = SessionLocal()
     try:
-        # Build Reset URL (Frontend)
-        # Assuming frontend is on standard location or configured in settings
+        # 1. Fetch Tenant Specific Config
+        config = db.query(EmailConfig).filter(EmailConfig.tenant_id == tenant_id).first()
+        
+        # 2. Fallback to Env/Settings
+        smtp_host = config.smtp_host if config else settings.SMTP_HOST
+        smtp_port = config.smtp_port if config else settings.SMTP_PORT
+        smtp_user = config.smtp_user if config else settings.SMTP_USER
+        smtp_password = config.smtp_password if config else settings.SMTP_PASSWORD
+        smtp_from_email = config.smtp_from_email if config else settings.SMTP_FROM_EMAIL
+        smtp_from_name = config.smtp_from_name if config else settings.SMTP_FROM_NAME
+        smtp_use_tls = config.smtp_use_tls if config else settings.SMTP_USE_TLS
+        smtp_use_ssl = config.smtp_use_ssl if config else settings.SMTP_USE_SSL
+        template = (config.reset_password_template if config and config.reset_password_template 
+                   else RESET_PASSWORD_EMAIL_TEMPLATE)
+
+        if not smtp_user or not smtp_password:
+            logger.warning(f"SMTP credentials not configured for tenant {tenant_id}. Skipping reset email.")
+            return False
+
+        # 3. Build Reset URL (Frontend)
         frontend_url = settings.FRONTEND_ORIGIN.split(',')[0].strip() if hasattr(settings, 'FRONTEND_ORIGIN') else "http://localhost:3000"
         reset_url = f"{frontend_url}/reset-password?token={token}"
 
-        # Prepare HTML body
-        html_body = RESET_PASSWORD_EMAIL_TEMPLATE.replace("{{token}}", token)
+        # 4. Prepare HTML body
+        html_body = template.replace("{{token}}", token)
         html_body = html_body.replace("{{reset_url}}", reset_url)
 
-        # Create message
+        # 5. Create message
         msg = MIMEMultipart("alternative")
-        msg["Subject"] = f"Password Reset: Secure Token for {settings.SMTP_FROM_NAME}"
-        msg["From"] = f"{settings.SMTP_FROM_NAME} <{settings.SMTP_FROM_EMAIL}>"
+        msg["Subject"] = f"Password Reset: Secure Token for {smtp_from_name}"
+        msg["From"] = f"{smtp_from_name} <{smtp_from_email}>"
         msg["To"] = recipient_email
-
-        # Attach HTML part
         msg.attach(MIMEText(html_body, "html"))
 
-        # Connect and send
-        if settings.SMTP_USE_SSL:
-            server = smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT)
+        # 6. Connect and send
+        if smtp_use_ssl:
+            server = smtplib.SMTP_SSL(smtp_host, smtp_port)
         else:
-            server = smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT)
-            if settings.SMTP_USE_TLS:
+            server = smtplib.SMTP(smtp_host, smtp_port)
+            if smtp_use_tls:
                 server.starttls()
         
-        # Clean credentials
         import re
-        smtp_user = re.sub(r'\s+', '', settings.SMTP_USER)
-        smtp_pass = re.sub(r'\s+', '', settings.SMTP_PASSWORD)
+        user = re.sub(r'\s+', '', smtp_user)
+        pw = re.sub(r'\s+', '', smtp_password)
         
-        server.login(smtp_user, smtp_pass)
-        server.sendmail(settings.SMTP_FROM_EMAIL.strip(), recipient_email, msg.as_string())
+        server.login(user, pw)
+        server.sendmail(smtp_from_email.strip(), recipient_email, msg.as_string())
         server.quit()
 
-        logger.info(f"Password reset email sent to {recipient_email}")
+        logger.info(f"Password reset email sent to {recipient_email} [Tenant {tenant_id}]")
         return True
     except Exception as e:
-        logger.error(f"Failed to send reset email to {recipient_email}: {e}")
+        logger.error(f"Failed to send reset email to {recipient_email} [Tenant {tenant_id}]: {e}")
         return False
+    finally:
+        db.close()

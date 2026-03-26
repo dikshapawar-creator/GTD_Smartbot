@@ -12,11 +12,12 @@ from app.api.users import router as users_router
 from app.api.roles import router as roles_router
 from app.api.admin import router as admin_router
 from app.api.sales import router as sales_router
+from app.api.super_admin import router as super_admin_router
+from app.api.admin_email import router as admin_email_router
 from app.api.live_chat import router as live_chat_router
+from app.services.live_chat_socket import init_live_chat_socket
 from app.api.ws_chat import router as ws_router, legacy_router as legacy_ws_router
 from app.api.bot_config import router as bot_config_router
-from app.api.super_admin import router as super_admin_router
-from app.services.live_chat_socket import init_live_chat_socket
 from app.services.tenant_service import TenantService
 from app.core.security import decode_access_token
 from app.db.session import SessionLocal
@@ -259,6 +260,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_router)
     app.include_router(sales_router)
     app.include_router(bot_config_router)
+    app.include_router(admin_email_router)
     app.include_router(super_admin_router)
 
     # Mount static files (search in app/static or root static/)

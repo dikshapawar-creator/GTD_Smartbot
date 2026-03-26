@@ -4,3 +4,4 @@ from app.models.chat_message import ChatMessage
 from app.models.intent_config import IntentConfig
 from app.models.auth import User, Role, Tenant, RefreshToken, PasswordReset, AuditLog
 from app.models.bot_config import BotConfig
+from app.models.email_config import EmailConfig

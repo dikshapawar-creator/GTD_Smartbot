@@ -230,7 +230,8 @@ async def submit_lead(
             recipient_email=lead.email,
             name=lead.name,
             product=lead.product,
-            country=lead.country_interested
+            country=lead.country_interested,
+            tenant_id=current_tenant_id
         )
 
         return {
@@ -275,16 +276,28 @@ def get_leads(
     limit: int = 20,
     sort_by: str = "created_at",
     sort_order: str = "desc",
+    target_tenant_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(2))
 ):
     """
     Scalable CRM endpoint for lead management.
     Handles searching, filtering, sorting, and pagination in the DB.
+    
+    Super Admins can filter by any tenant_id using target_tenant_id.
     """
+    # 1. Determine Tenant Context
+    is_super = getattr(current_user, 'is_super_admin', False) or getattr(current_user, '_jwt_is_super_admin', False)
+    
+    # If superadmin and target_tenant_id provided, use it. 
+    # Otherwise fallback to user's primary tenant_id.
+    effective_tenant_id = current_user.tenant_id
+    if is_super and target_tenant_id is not None:
+        effective_tenant_id = target_tenant_id
+
     leads, total = lead_service.get_filtered_leads(
         db,
-        tenant_id=current_user.tenant_id,
+        tenant_id=effective_tenant_id,
         search=search,
         status=status,
         country=country,

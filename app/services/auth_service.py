@@ -170,7 +170,7 @@ class AuthService:
             db.commit()
             
             # Send actual email via SMTP
-            send_reset_email(email, raw_token)
+            send_reset_email(email, raw_token, tenant_id=user.tenant_id)
             
             AuditService.log_action(db, "PASSWORD_RESET_REQUESTED", user.tenant_id, actor_user_id=user.id)
         # Unknown email: silently ignore, do NOT log (no valid tenant_id)
