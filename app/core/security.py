@@ -2,6 +2,7 @@ import bcrypt
 import hmac
 import hashlib
 import secrets
+import string
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Union, Optional
@@ -89,3 +90,9 @@ def hash_token(token: str) -> str:
 def secure_compare(val1: str, val2: str) -> bool:
     """Constant-time comparison for security tokens."""
     return hmac.compare_digest(val1, val2)
+
+def generate_tenant_key(length: int = 10) -> str:
+    """Generate a short, URL-safe tenant identifier (e.g. 'gtd_7a2b9c')."""
+    # Using lowercase and digits for maximum URL compatibility and readability
+    characters = string.ascii_lowercase + string.digits
+    return "".join(secrets.choice(characters) for _ in range(length))

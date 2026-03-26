@@ -36,17 +36,32 @@ class UserService:
         if creator.role.level < 2: # Sales
             raise HTTPException(status_code=403, detail="Sales users cannot create accounts.")
 
-        # 4. Create User (Locked to creator's tenant)
+        # 4. Create User (Legacy tenant_id = creator's or primary)
+        primary_tid = user_in.tenant_ids[0] if user_in.tenant_ids else creator.tenant_id
         new_user = User(
             email=user_in.email,
             password_hash=get_password_hash(user_in.password),
             role_id=target_role.id,
-            tenant_id=creator.tenant_id,
+            tenant_id=primary_tid,
             is_active=True
         )
         db.add(new_user)
+        db.flush() # Get ID for mapping
+        
+        # 5. Assign Tenants via UserTenantService
+        from app.services.user_tenant_service import UserTenantService
+        t_ids = user_in.tenant_ids or [creator.tenant_id]
+        UserTenantService.assign_tenants(
+            db, 
+            user_id=new_user.id, 
+            tenant_ids=t_ids,
+            primary_tenant_id=primary_tid,
+            actor_user_id=creator.id
+        )
+
         db.commit()
         db.refresh(new_user)
+
 
         AuditService.log_action(
             db, "USER_CREATED", creator.tenant_id, 
@@ -115,7 +130,7 @@ class UserService:
             
             # Hierarchy: Admin (2) cannot create/promote to Admin (2) or Administrator (3)
             if creator.role.level == 2 and target_role.level >= 2:
-                 raise HTTPException(status_code=403, detail="Admins can only assign Sales roles.")
+                raise HTTPException(status_code=403, detail="Admins can only assign Sales roles.")
             
             target.role_id = target_role.id
 

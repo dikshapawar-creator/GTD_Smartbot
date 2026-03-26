@@ -9,7 +9,7 @@ class IntentConfig(Base):
     __tablename__ = "intent_configs"
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
-    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, default=1, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
     
     # Intent identifier (e.g., 'GREETING', 'SALES_DEMO')
     intent_key = Column(String(50), nullable=False, index=True)

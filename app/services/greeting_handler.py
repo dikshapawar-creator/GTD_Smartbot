@@ -17,7 +17,7 @@ def handle_greeting(db: Session, chat_session: ChatSession) -> dict:
     # Force professional greeting (pinned to GTD Service / Tenant 1 flow)
     config = db.query(IntentConfig).filter(
         IntentConfig.intent_key == "GREETING",
-        IntentConfig.tenant_id == 1
+        IntentConfig.tenant_id == chat_session.tenant_id
     ).first()
 
     # Fallback to generic if still not in DB

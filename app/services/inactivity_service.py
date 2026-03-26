@@ -59,7 +59,7 @@ async def send_inactivity_message(session_id: str, last_activity_timestamp: date
             from app.models.intent_config import IntentConfig
             config = db.query(IntentConfig).filter(
                 IntentConfig.intent_key == "INACTIVITY_NUDGE",
-                IntentConfig.tenant_id == 1
+                IntentConfig.tenant_id == chat_session.tenant_id
             ).first()
             
             inactivity_msg = config.response_text if (config and config.response_text) else (

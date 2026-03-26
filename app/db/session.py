@@ -147,49 +147,56 @@ def init_db():
         # 2. Synchronize Schema with metadata refresh
         Base.metadata.create_all(bind=engine)
 
-        # 2.5 Seed default BotConfig for the default tenant if missing
+        # 2.5 Seed default BotConfig for the primary tenant if missing
         try:
             _session = SessionLocal()
-            existing = _session.query(BotConfig).filter(
-                BotConfig.tenant_id == settings.DEFAULT_TENANT_ID
-            ).first()
-            if not existing:
-                _session.add(BotConfig(
-                    tenant_id=settings.DEFAULT_TENANT_ID,
-                    chatbot_name="GTD Support",
-                    chatbot_logo_url="/logo.png",
-                    fab_tooltip="Trade Support",
-                    welcome_text="Welcome to GTD Service."
-                ))
-                _session.commit()
-                logger.info("Database: Seeded default BotConfig.")
+            # Explicitly find the primary/first active tenant
+            primary_tenant = _session.query(Tenant).filter(Tenant.id == 2).first() or \
+                             _session.query(Tenant).filter(Tenant.is_active == True).first()
+            
+            if primary_tenant:
+                tid = primary_tenant.id
+                existing = _session.query(BotConfig).filter(BotConfig.tenant_id == tid).first()
+                if not existing:
+                    _session.add(BotConfig(
+                        tenant_id=tid,
+                        chatbot_name="GTD Support",
+                        chatbot_logo_url="/static/logo.png",
+                        fab_tooltip="Trade Support",
+                        welcome_text="Welcome to GTD Service."
+                    ))
+                    _session.commit()
+                    logger.info(f"Database: Seeded BotConfig for tenant {tid}.")
             _session.close()
         except Exception as e:
             logger.warning(f"Database: BotConfig seeding skipped — {e}")
 
-        # 2.6 Seed default EmailConfig for the default tenant if missing
+        # 2.6 Seed default EmailConfig if missing
         try:
             _session = SessionLocal()
-            existing_email = _session.query(EmailConfig).filter(
-                EmailConfig.tenant_id == settings.DEFAULT_TENANT_ID
-            ).first()
-            if not existing_email:
-                from app.services.email_service import CONFIRMATION_EMAIL_TEMPLATE, RESET_PASSWORD_EMAIL_TEMPLATE
-                _session.add(EmailConfig(
-                    tenant_id=settings.DEFAULT_TENANT_ID,
-                    smtp_host=settings.SMTP_HOST,
-                    smtp_port=settings.SMTP_PORT,
-                    smtp_user=settings.SMTP_USER,
-                    smtp_password=settings.SMTP_PASSWORD,
-                    smtp_from_email=settings.SMTP_FROM_EMAIL,
-                    smtp_from_name=settings.SMTP_FROM_NAME,
-                    smtp_use_tls=settings.SMTP_USE_TLS,
-                    smtp_use_ssl=settings.SMTP_USE_SSL,
-                    confirmation_template=CONFIRMATION_EMAIL_TEMPLATE,
-                    reset_password_template=RESET_PASSWORD_EMAIL_TEMPLATE
-                ))
-                _session.commit()
-                logger.info("Database: Seeded default EmailConfig.")
+            primary_tenant = _session.query(Tenant).filter(Tenant.id == 2).first() or \
+                             _session.query(Tenant).filter(Tenant.is_active == True).first()
+            
+            if primary_tenant:
+                tid = primary_tenant.id
+                existing_email = _session.query(EmailConfig).filter(EmailConfig.tenant_id == tid).first()
+                if not existing_email:
+                    from app.services.email_service import CONFIRMATION_EMAIL_TEMPLATE, RESET_PASSWORD_EMAIL_TEMPLATE
+                    _session.add(EmailConfig(
+                        tenant_id=tid,
+                        smtp_host=settings.SMTP_HOST,
+                        smtp_port=settings.SMTP_PORT,
+                        smtp_user=settings.SMTP_USER,
+                        smtp_password=settings.SMTP_PASSWORD,
+                        smtp_from_email=settings.SMTP_FROM_EMAIL,
+                        smtp_from_name=settings.SMTP_FROM_NAME,
+                        smtp_use_tls=settings.SMTP_USE_TLS,
+                        smtp_use_ssl=settings.SMTP_USE_SSL,
+                        confirmation_template=CONFIRMATION_EMAIL_TEMPLATE,
+                        reset_password_template=RESET_PASSWORD_EMAIL_TEMPLATE
+                    ))
+                    _session.commit()
+                    logger.info(f"Database: Seeded EmailConfig for tenant {tid}.")
             _session.close()
         except Exception as e:
             logger.warning(f"Database: EmailConfig seeding skipped — {e}")
@@ -215,7 +222,7 @@ def _ensure_tenant_id_columns(engine):
     try:
         with engine.begin() as conn:
             # 1. Tenants table metadata
-            for col, col_type in [("api_key", "NVARCHAR(255)"), ("domain", "NVARCHAR(255)")]:
+            for col, col_type in [("api_key", "NVARCHAR(255)"), ("domain", "NVARCHAR(255)"), ("tenant_key", "NVARCHAR(100)")]:
                 check_col = conn.execute(text(
                     f"SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'tenants' AND COLUMN_NAME = '{col}'"
                 )).fetchone()
@@ -238,7 +245,7 @@ def _ensure_tenant_id_columns(engine):
                 )).fetchone()
                 if not check_tenant:
                     logger.info(f"Database: Adding tenant_id to {table}...")
-                    conn.execute(text(f"ALTER TABLE {table} ADD tenant_id INT NOT NULL DEFAULT 1"))
+                    conn.execute(text(f"ALTER TABLE {table} ADD tenant_id INT NOT NULL DEFAULT 2"))
                     try:
                         conn.execute(text(f"CREATE INDEX ix_{table}_tenant_id ON {table}(tenant_id)"))
                     except Exception as e:
@@ -305,6 +312,16 @@ def _ensure_tenant_id_columns(engine):
             default_tenant = conn.execute(text(f"SELECT id FROM tenants WHERE id = {settings.DEFAULT_TENANT_ID}")).fetchone()
             if default_tenant:
                 conn.execute(text(f"UPDATE tenants SET api_key = 'tenant_abc123', domain = 'localhost' WHERE id = {settings.DEFAULT_TENANT_ID} AND api_key IS NULL"))
+            
+            # 7.5 Retroactively populate tenant_key if NULL
+            tenants_without_key = conn.execute(text("SELECT id, name FROM tenants WHERE tenant_key IS NULL")).fetchall()
+            if tenants_without_key:
+                from app.core.security import generate_tenant_key
+                for tid, tname in tenants_without_key:
+                    # Generate a key (e.g., 'gtd_7a2b9c' or just '7a2b9c')
+                    new_key = generate_tenant_key(length=8)
+                    logger.info(f"Database: Retroactively assigning key {new_key} to tenant {tid}")
+                    conn.execute(text("UPDATE tenants SET tenant_key = :key WHERE id = :id"), {"key": new_key, "id": tid})
 
             # 8. Force Global Re-login
             conn.execute(text("UPDATE users SET token_version = 5 WHERE token_version < 5"))

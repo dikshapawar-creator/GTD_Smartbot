@@ -210,21 +210,34 @@ def send_confirmation_email(recipient_email: str, name: str, product: str = "Gen
         # 1. Fetch Tenant Specific Config
         config = db.query(EmailConfig).filter(EmailConfig.tenant_id == tenant_id).first()
         
-        # 2. Fallback to Env/Settings (Backward Compatibility)
-        smtp_host = config.smtp_host if config else settings.SMTP_HOST
-        smtp_port = config.smtp_port if config else settings.SMTP_PORT
-        smtp_user = config.smtp_user if config else settings.SMTP_USER
-        smtp_password = config.smtp_password if config else settings.SMTP_PASSWORD
-        smtp_from_email = config.smtp_from_email if config else settings.SMTP_FROM_EMAIL
-        smtp_from_name = config.smtp_from_name if config else settings.SMTP_FROM_NAME
-        smtp_use_tls = config.smtp_use_tls if config else settings.SMTP_USE_TLS
-        smtp_use_ssl = config.smtp_use_ssl if config else settings.SMTP_USE_SSL
-        template = (config.confirmation_template if config and config.confirmation_template 
-                   else CONFIRMATION_EMAIL_TEMPLATE)
+        # 2. Robust Fallback Strategy
+        if not config:
+            logger.info(f"No custom email config for tenant {tenant_id}. Using system defaults.")
+            # Map settings to a pseudo-config or just use settings directly
+            smtp_host = settings.SMTP_HOST
+            smtp_port = settings.SMTP_PORT
+            smtp_user = settings.SMTP_USER
+            smtp_password = settings.SMTP_PASSWORD
+            smtp_from_email = settings.SMTP_FROM_EMAIL
+            smtp_from_name = settings.SMTP_FROM_NAME
+            smtp_use_tls = settings.SMTP_USE_TLS
+            smtp_use_ssl = settings.SMTP_USE_SSL
+            template = CONFIRMATION_EMAIL_TEMPLATE
+        else:
+            smtp_host = config.smtp_host
+            smtp_port = config.smtp_port
+            smtp_user = config.smtp_user
+            smtp_password = config.smtp_password
+            smtp_from_email = config.smtp_from_email
+            smtp_from_name = config.smtp_from_name
+            smtp_use_tls = config.smtp_use_tls
+            smtp_use_ssl = config.smtp_use_ssl
+            template = config.confirmation_template or CONFIRMATION_EMAIL_TEMPLATE
 
         if not smtp_user or not smtp_password:
-            logger.warning(f"SMTP credentials not configured for tenant {tenant_id}. Skipping email.")
+            logger.error(f"CRITICAL: SMTP credentials missing even in defaults for tenant {tenant_id}. Cannot send email.")
             return False
+
 
         # 3. Prepare HTML body
         html_body = template.replace("{{name}}", name)

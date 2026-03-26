@@ -314,6 +314,7 @@ def get_active_session(db: Session, session_id: str, tenant_id: int = None) -> O
 # Module-level function for backward compatibility with chatbot.py
 def create_session(
     db: Session,
+    tenant_id: int,
     ip_address: str,
     country: str = None,
     city: str = None,
@@ -323,7 +324,6 @@ def create_session(
     os_name: str = "Unknown", 
     device_type: str = "desktop",
     fingerprint: str = None,
-    tenant_id: int = None,
     visitor_uuid: str = None,
     lead_id: int = None
 ) -> ChatSession:

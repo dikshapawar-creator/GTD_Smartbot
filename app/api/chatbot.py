@@ -135,9 +135,13 @@ async def initialize_session(request: Request, response: Response, background_ta
         logger.warning("[SESSION_INIT] No visitor_uuid provided in session initialization request")
 
     if not existing_session:
-        logger.info(f"[SESSION_INIT] Creating NEW session for visitor {visitor_uuid_ext}")
-        # Use tenant_id from request state (set by middleware)
-        requested_tenant_id = request.state.tenant_id or settings.DEFAULT_TENANT_ID
+        # 🔥 SENIOR FIX: Strictly use resolved tenant_id from middleware
+        current_tenant_id = request.state.tenant_id
+        if not current_tenant_id:
+            logger.error(f"Chat session init failed: No tenant identified for request from {client_ip}")
+            raise HTTPException(status_code=403, detail="Tenant context required.")
+
+        logger.info(f"[SESSION_INIT] Creating NEW session for visitor {visitor_uuid_ext} on tenant {current_tenant_id}")
         
         new_session = session_service.create_session(
             db, 
@@ -150,11 +154,12 @@ async def initialize_session(request: Request, response: Response, background_ta
             os_name=meta["os"],
             device_type=meta["device_type"],
             fingerprint=fingerprint,
-            tenant_id=request.state.tenant_id or requested_tenant_id,
+            tenant_id=current_tenant_id,
+
             visitor_uuid=visitor_uuid_ext,
             lead_id=carry_over_lead_id # 🔥 Identity Retention
         )
-        logger.info(f"[SESSION_INIT] NEW session created: {new_session.session_id} for tenant {requested_tenant_id}")
+        logger.info(f"[SESSION_INIT] NEW session created: {new_session.session_id} for tenant {current_tenant_id}")
     
     # 🚨 COMMIT BEFORE BROADCAST
     db.commit()

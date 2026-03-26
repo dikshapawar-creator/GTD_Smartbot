@@ -9,8 +9,15 @@ class Tenant(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(255), nullable=False)
+    tenant_key = Column(String(100), unique=True, nullable=True, index=True) # Secure public identifier
     api_key = Column(String(255), unique=True, nullable=True, index=True)
     domain = Column(String(255), unique=True, nullable=True, index=True)
+    
+    # ── SaaS Configuration ──────────────────────────────────────────────
+    widget_token = Column(String(100), unique=True, nullable=True)
+    allowed_domains = Column(String(1000), nullable=True) # JSON or comma-separated
+    chatbot_config = Column(String(2000), nullable=True) # JSON string
+    
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, server_default=text("GETDATE()"))
 
@@ -25,7 +32,7 @@ class Role(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(50), nullable=False)
-    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, default=1)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
     description = Column(String(255), nullable=True)
     level = Column(Integer, nullable=False)  # 4: super_admin, 3: administrator, 2: admin, 1: sales
     created_at = Column(DateTime, server_default=text("GETDATE()"))
@@ -42,7 +49,9 @@ class User(Base):
     full_name = Column(String(255), nullable=True)
     password_hash = Column(String(255), nullable=False)
     role_id = Column(Integer, ForeignKey("roles.id"), nullable=False)
-    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)  # Primary/default (backward compat)
+    # 🧪 DEPRECATED: Use user_tenants table for multi-tenant mapping.
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
+
     is_active = Column(Boolean, default=True)
     is_super_admin = Column(Boolean, default=False, server_default=text("0"))  # Super admin bypass
     token_version = Column(Integer, default=1)
@@ -92,7 +101,7 @@ class RefreshToken(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, default=1)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
     token_hash = Column(String(255), nullable=False, index=True)
     expires_at = Column(DateTime, nullable=False)
     is_revoked = Column(Boolean, default=False)
@@ -106,7 +115,7 @@ class PasswordReset(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, default=1)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
     token_hash = Column(String(255), nullable=False, index=True)
     expires_at = Column(DateTime, nullable=False)
     is_used = Column(Boolean, default=False)

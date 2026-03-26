@@ -15,7 +15,7 @@ from app.schemas.user import (
     SuperAdminUserCreate, SuperAdminTenantCreate,
     TenantResponse, UserResponse, TenantUpdate
 )
-from app.core.security import get_password_hash, validate_password
+from app.core.security import get_password_hash, validate_password, generate_tenant_key
 from app.services.user_tenant_service import UserTenantService
 from app.services.audit_service import AuditService
 
@@ -36,9 +36,12 @@ def create_tenant(
             raise HTTPException(status_code=400, detail=f"Domain '{payload.domain}' already exists")
 
     api_key = payload.api_key or secrets.token_urlsafe(32)
+    # 🧪 Automated Short Key Generation
+    tenant_key = generate_tenant_key(length=8)
 
     tenant = Tenant(
         name=payload.name,
+        tenant_key=tenant_key,
         domain=payload.domain,
         api_key=api_key,
         is_active=True

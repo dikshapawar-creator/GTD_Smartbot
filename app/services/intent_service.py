@@ -90,8 +90,8 @@ def detect_intent(db: Session, message: str, tenant_id: int) -> str:
             logger.error(f"Error querying IntentConfig for tenant {target_id}: {e}")
             return None, 0
 
-    # Force detection via GTD Service (Tenant 1) patterns for exact flow synchronization
-    best_match, longest_kw_len = fetch_best_match(1)
+    # Dynamic detection via the active tenant's patterns
+    best_match, longest_kw_len = fetch_best_match(tenant_id)
 
     if best_match:
         logger.info(f"Best DB match: {best_match} (len={longest_kw_len})")

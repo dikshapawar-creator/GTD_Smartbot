@@ -8,8 +8,10 @@ from app.schemas.user import (
     UserCreate, UserUpdate, UserResponse,
     AssignTenantsRequest, TenantStatusUpdate, UserTenantRead
 )
-from app.services.user_service import UserService
 from app.services.user_tenant_service import UserTenantService
+from app.core.db_utils import verify_tenant_access, apply_tenant_filter
+from app.services.audit_service import AuditService
+
 
 router = APIRouter(prefix="/users", tags=["User Management"])
 
@@ -49,17 +51,23 @@ def list_users(
     current_user: User = Depends(require_role(2))
 ):
     """List users. Super admins see all, admins see their own tenant."""
+    is_super = getattr(current_user, 'is_super_admin', False) or getattr(current_user, '_jwt_is_super_admin', False)
+    
     query = db.query(User).options(
         joinedload(User.role),
         joinedload(User.user_tenants).joinedload(UserTenant.tenant)
     )
     
-    # Super admins see everything; system admins see their bucket
-    if not current_user.is_super_admin:
-        query = query.filter(User.tenant_id == current_user.tenant_id)
+    # Strictly filter by resolved tenant context unless super admin
+    # In list_users, we usually show users of the "current" active tenant
+    target_tenant_id = current_user.tenant_id
+    
+    if not is_super:
+        query = apply_tenant_filter(query, User, target_tenant_id)
         
     users = query.all()
     return users
+
 
 
 @router.delete("/{id}")

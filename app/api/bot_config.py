@@ -7,10 +7,13 @@ from sqlalchemy.orm import Session
 
 from app.core.dependencies import get_db
 from app.core.config import settings
+from app.core.db_utils import verify_tenant_access
 from app.api.deps import require_role
-from app.models.auth import User
+from app.models.auth import User, Tenant
 from app.models.bot_config import BotConfig
 from app.schemas.bot_config import BotConfigResponse, BotConfigUpdate
+from app.services.audit_service import AuditService
+
 
 logger = logging.getLogger(__name__)
 
@@ -25,14 +28,17 @@ def _get_or_create_config(db: Session, tenant_id: int) -> BotConfig:
     """Get existing config or create default for tenant."""
     config = db.query(BotConfig).filter(BotConfig.tenant_id == tenant_id).first()
     if not config:
-        # Ensure static/logo.png or better exists
-        # We start with the universal high-fidelity avatar uploaded today
-        default_logo = "/static/logos/chatbot_logo_2_67e79328.png"
-        
+        # Check if tenant exists
+        tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+        if not tenant:
+            logger.error(f"Attempted to get/create bot config for non-existent tenant_id: {tenant_id}")
+            raise HTTPException(status_code=404, detail="Tenant not found")
+
+        # Create default
         config = BotConfig(
             tenant_id=tenant_id,
             chatbot_name="GTD Support",
-            chatbot_logo_url=default_logo,
+            chatbot_logo_url="/static/logos/chatbot_logo_2_67e79328.png",
             fab_tooltip="Trade Support",
             welcome_text="Welcome to GTD Service.",
             primary_color="#2563eb",
@@ -42,7 +48,12 @@ def _get_or_create_config(db: Session, tenant_id: int) -> BotConfig:
         db.add(config)
         db.commit()
         db.refresh(config)
+        
+        # Log initialization
+        AuditService.log_action(db, "BOT_CONFIG_INITIALIZED", tenant_id)
+    
     return config
+
 
 
 @router.get("/bot-config", response_model=BotConfigResponse)
@@ -55,19 +66,17 @@ def get_bot_config(
     Public endpoint to fetch chatbot branding configuration.
     Tenant is identified via API key, JWT, or domain in middleware.
     """
-    target_tenant_id = request.state.tenant_id or settings.DEFAULT_TENANT_ID
-    if tenant_id:
-        # Check if current user is super admin if they are trying to override
-        # We need the user to verify this, but for now we follow the same pattern as intents.py
-        # Actually, get_bot_config is public but request.state.tenant_id is usually set.
-        # If tenant_id is passed, we check if it's a super admin request.
-        target_tenant_id = tenant_id
-
-    logger.info(f"Fetching bot config for tenant: {target_tenant_id}")
+    # Use strictly resolved tenant_id from middleware (via tenant_key or domain)
+    target_tenant_id = request.state.tenant_id
     
+    if not target_tenant_id:
+         logger.error(f"SECURITY BLOCK: No tenant identified for bot-config access from {request.client.host}")
+         raise HTTPException(status_code=403, detail="Tenant context required to fetch bot config.")
+
     # Use helper to ensure a config exists (with defaults if new)
     config = _get_or_create_config(db, target_tenant_id)
     return BotConfigResponse.model_validate(config)
+
 
 
 @router.put("/admin/bot-config", response_model=BotConfigResponse)

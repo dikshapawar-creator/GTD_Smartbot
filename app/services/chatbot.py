@@ -19,11 +19,11 @@ from app.models.intent_config import IntentConfig
 
 class ChatbotService:
     @staticmethod
-    def _get_dynamic_response(db: Session, intent_key: str, default: str) -> str:
-        """Helper to fetch responses from Tenant 1 (GTD Service) to avoid hardcoding."""
+    def _get_dynamic_response(db: Session, intent_key: str, default: str, tenant_id: int) -> str:
+        """Helper to fetch responses from the active tenant's config."""
         config = db.query(IntentConfig).filter(
             IntentConfig.intent_key == intent_key,
-            IntentConfig.tenant_id == 1,
+            IntentConfig.tenant_id == tenant_id,
             IntentConfig.is_active == True
         ).first()
         return config.response_text if (config and config.response_text) else default
@@ -40,7 +40,7 @@ class ChatbotService:
             ChatState.ENDED: ("FALLBACK_GENERIC", "Thank you. We will arrange a call for you shortly.")
         }
         key, default = state_map.get(state, ("UNKNOWN", "How can I help you?"))
-        return ChatbotService._get_dynamic_response(db, key, default)
+        return ChatbotService._get_dynamic_response(db, key, default, 1) # Fallback to 1 for generic questions if needed, or pass session.tenant_id
 
     @staticmethod
     def _clean_bot_response(text: str) -> str:
@@ -101,7 +101,8 @@ class ChatbotService:
             urgent_msg = ChatbotService._get_dynamic_response(
                 db, 
                 "URGENT_SUPPORT", 
-                "We understand your request is urgent. For immediate assistance, please contact us on WhatsApp: +91 8527376675"
+                "We understand your request is urgent. For immediate assistance, please contact us on WhatsApp: +91 8527376675",
+                chat_session.tenant_id
             )
             session_service.save_message(db, chat_session, urgent_msg, "bot")
             session_service.update_chat_state(db, chat_session, ChatState.COMPLETE)
@@ -118,11 +119,11 @@ class ChatbotService:
 
         intent_response = None
         
-        # Force specialized intent from GTD Service (Tenant 1) for exact flow sync
+        # Force specialized intent from the ACTIVE tenant
         from app.models.intent_config import IntentConfig
         config = db.query(IntentConfig).filter(
             IntentConfig.intent_key == intent_key,
-            IntentConfig.tenant_id == 1,
+            IntentConfig.tenant_id == chat_session.tenant_id,
             IntentConfig.is_active == True
         ).first()
         if config and config.response_text:
@@ -189,7 +190,8 @@ class ChatbotService:
         fallback_msg = ChatbotService._get_dynamic_response(
             db, 
             "FALLBACK_GENERIC", 
-            "Thank you. We will arrange a call for you shortly.\n\nYou can discuss all your questions with our team during the meeting.\n\nRegarding your data and requirements, our team will provide you with the appropriate solution."
+            "Thank you. We will arrange a call for you shortly.\n\nYou can discuss all your questions with our team during the meeting.\n\nRegarding your data and requirements, our team will provide you with the appropriate solution.",
+            chat_session.tenant_id
         )
         
         session_service.update_chat_state(db, chat_session, ChatState.FALLBACK.value)

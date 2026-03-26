@@ -227,8 +227,10 @@ async def send_message(
         .where(
             and_(
                 ChatSession.visitor_uuid == session_uuid,
+                ChatSession.tenant_id == current_user.tenant_id,
                 ChatSession.session_status == SessionStatus.ACTIVE
             )
+
         )
         .order_by(ChatSession.last_activity_at.desc())
         .limit(1)
@@ -286,8 +288,10 @@ async def close_session(
         .where(
             and_(
                 ChatSession.visitor_uuid == session_uuid,
+                ChatSession.tenant_id == current_user.tenant_id,
                 ChatSession.session_status == SessionStatus.ACTIVE
             )
+
         )
         .order_by(ChatSession.last_activity_at.desc())
         .limit(1)
@@ -336,8 +340,10 @@ async def toggle_priority(
         .where(
             and_(
                 ChatSession.visitor_uuid == session_uuid,
+                ChatSession.tenant_id == current_user.tenant_id,
                 ChatSession.session_status == SessionStatus.ACTIVE
             )
+
         )
         .order_by(ChatSession.last_activity_at.desc())
         .limit(1)
@@ -381,8 +387,10 @@ async def toggle_spam(
         .where(
             and_(
                 ChatSession.visitor_uuid == session_uuid,
+                ChatSession.tenant_id == current_user.tenant_id,
                 ChatSession.session_status == SessionStatus.ACTIVE
             )
+
         )
         .order_by(ChatSession.last_activity_at.desc())
         .limit(1)
@@ -425,8 +433,10 @@ async def block_visitor(
         .where(
             and_(
                 ChatSession.visitor_uuid == session_uuid,
+                ChatSession.tenant_id == current_user.tenant_id,
                 ChatSession.session_status == SessionStatus.ACTIVE
             )
+
         )
         .order_by(ChatSession.last_activity_at.desc())
         .limit(1)

@@ -1,11 +1,12 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, Column, Integer, ForeignKey
+from typing import List, Optional
 from datetime import datetime, timedelta, timezone
 
 from app.api.deps import require_role
 from app.core.dependencies import get_db
-from app.models.auth import User, AuditLog
+from app.models.auth import User, AuditLog, Tenant
 from app.models.lead import Lead, LeadStatus
 from app.models.chat_session import ChatSession, SessionStatus
 from app.models.chat_message import ChatMessage
@@ -13,16 +14,52 @@ from app.models.blocked import BlockedVisitor
 
 router = APIRouter(prefix="/admin", tags=["Administration (High Privilege)"])
 
+@router.get("/tenants", summary="List all tenants for the Org Switcher")
+def get_all_tenants(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(2))
+):
+    """
+    Returns the list of all tenants for Super Admins, 
+    or just the authorized tenants for regular admins.
+    """
+    is_super = getattr(current_user, 'is_super_admin', False) or getattr(current_user, '_jwt_is_super_admin', False)
+    
+    if is_super:
+        tenants = db.query(Tenant).filter(Tenant.is_active == True).all()
+    else:
+        # Filter for only tenants this user is explicitly mapped to
+        allowed_ids = [ut.tenant_id for ut in current_user.user_tenants]
+        tenants = db.query(Tenant).filter(Tenant.id.in_(allowed_ids), Tenant.is_active == True).all()
+        
+    return {
+        "success": True,
+        "data": tenants
+    }
+
 @router.get("/stats")
 def get_dashboard_stats(
+    target_tenant_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(2))
 ):
     """
     Enterprise Dashboard Analytics: Represents real business data.
     """
-    tenant_id = current_user.tenant_id
-    tenant_name = current_user.tenant.name if current_user.tenant else "System Workspace"
+    is_super = getattr(current_user, 'is_super_admin', False)
+    
+    # 🚨 SECURITY: Prevent non-super admins from looking into other tenants
+    if target_tenant_id and not is_super:
+        # Check if they have specific access via user_tenants mapping if not super admin
+        allowed_ids = [ut.tenant_id for ut in current_user.user_tenants]
+        if target_tenant_id not in allowed_ids:
+            target_tenant_id = None # Silently fallback to primary if unauthorized
+
+    tenant_id = target_tenant_id if target_tenant_id else current_user.tenant_id
+    
+    # Fetch tenant name for the context
+    target_tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first() if tenant_id != current_user.tenant_id else current_user.tenant
+    tenant_name = target_tenant.name if target_tenant else "System Workspace"
 
     # 1. KPI Metrics
     total_leads = db.query(func.count(Lead.id)).filter(Lead.tenant_id == tenant_id, Lead.is_deleted == False).scalar()

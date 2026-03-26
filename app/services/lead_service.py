@@ -24,7 +24,7 @@ def update_lead_status(
     db: Session, 
     lead_id: str, 
     new_status: str, 
-    tenant_id: int = settings.DEFAULT_TENANT_ID,
+    tenant_id: int,
     changed_by: str = "system",
     source: str = "api",
     expected_version: Optional[int] = None
@@ -74,7 +74,7 @@ def update_lead_status(
     return lead
 
 
-def get_lead_history(db: Session, lead_id: str, tenant_id: int = settings.DEFAULT_TENANT_ID) -> List[LeadStatusHistory]:
+def get_lead_history(db: Session, lead_id: str, tenant_id: int) -> List[LeadStatusHistory]:
     """
     Retrieve audit trail for a lead.
     """
@@ -84,7 +84,7 @@ def get_lead_history(db: Session, lead_id: str, tenant_id: int = settings.DEFAUL
 def create_or_update_lead(
     db: Session,
     lead_req: LeadSubmitRequest,
-    tenant_id: int = settings.DEFAULT_TENANT_ID,
+    tenant_id: int,
     source: str = "chatbot",
     session_id: Optional[str] = None,
     metadata: Optional[dict] = None
@@ -208,7 +208,7 @@ def create_or_update_lead(
     return lead, is_duplicate
 
 
-def soft_delete_lead(db: Session, lead_id: str, tenant_id: int = settings.DEFAULT_TENANT_ID) -> bool:
+def soft_delete_lead(db: Session, lead_id: str, tenant_id: int) -> bool:
     """
     Enterprise Soft-Delete: Mark as deleted but preserve for audit.
     """

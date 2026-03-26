@@ -12,6 +12,8 @@ class UserBase(BaseModel):
 class UserCreate(UserBase):
     password: str
     role_name: str
+    tenant_ids: Optional[List[int]] = None # List of authorized tenants
+
 
     @field_validator("password")
     @classmethod
@@ -66,6 +68,7 @@ class UserResponse(UserBase):
 class TenantResponse(BaseModel):
     id: int
     name: str
+    tenant_key: Optional[str] = None
     domain: Optional[str] = None
     api_key: Optional[str] = None
     is_active: bool

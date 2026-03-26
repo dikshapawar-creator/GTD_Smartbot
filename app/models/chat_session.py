@@ -34,7 +34,7 @@ class ChatSession(Base):
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     
     # Scalability & Multi-tenancy
-    tenant_id = Column(Integer, nullable=False, default=1, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
 
     # Server-generated UUID v4
     session_id = Column(String(36), nullable=False, unique=True, index=True)

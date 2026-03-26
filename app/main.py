@@ -1,7 +1,10 @@
 import logging
+from datetime import datetime
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response, HTTPException
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+
 from app.core.config import settings
 from app.db.session import init_db
 from app.api.chatbot import router as chatbot_router
@@ -124,113 +127,108 @@ def create_app() -> FastAPI:
     
     @app.middleware("http")
     async def tenant_middleware(request: Request, call_next):
-        # 1. Skip tenant check for health, root, and static files
-        if request.url.path in ["/health", "/", "/debug-logs"] or request.url.path.startswith("/static"):
+        from app.core.tenant_resolver import TenantResolver
+        from app.core.security import decode_access_token
+        from app.models.auth import User
+
+        # 1. Skip tenant check for health, root, documentation, and static files
+        if request.url.path in ["/health", "/", "/debug-logs", "/debug-db", "/favicon.ico"] or \
+           request.url.path.startswith("/static") or \
+           request.url.path.startswith("/docs") or \
+           request.url.path.startswith("/openapi.json") or \
+           request.url.path.startswith("/redoc"):
             return await call_next(request)
         
-        # 2. Extract Tenant Context
-        tenant_id = None
         db = SessionLocal()
+        tenant_id = None
         try:
-            # Priority 1: API Key (Chatbot)
-            api_key = request.headers.get("x-api-key") or request.query_params.get("api_key")
-            if api_key:
-                tenant = TenantService.get_tenant_by_api_key(db, api_key)
-                if tenant:
-                    tenant_id = tenant.id
-
-            # Priority 2: JWT (CRM/Admin)
-            if not tenant_id:
-                auth_header = request.headers.get("Authorization")
-                token = None
-                if auth_header and auth_header.startswith("Bearer "):
-                    token = auth_header.split(" ")[1]
+            # 2. Identify Path Type
+            public_paths = ["/chat", "/bot-config", "/leads/submit"]
+            is_public = any(request.url.path.startswith(p) for p in public_paths)
+            
+            # 3. Resolve Tenant
+            try:
+                if is_public:
+                    tenant_id = TenantResolver.resolve_public_tenant(db, request)
                 else:
-                    token = request.query_params.get("token")  # WebSockets
-
-                if token:
-                    payload = decode_access_token(token)
-                    if payload:
-                        is_super = payload.get("is_super_admin", False)
-                        jwt_tenant_ids = payload.get("tenant_ids", [])
-                        jwt_primary = payload.get("primary_tenant_id") or payload.get("tenant_id")
-
-                        # Check if caller explicitly requests a specific tenant
-                        requested_tid = request.headers.get("X-Tenant-ID") or request.query_params.get("tenant_id")
-
-                        if requested_tid:
-                            requested_int = int(requested_tid)
-                            # Super admins can access any tenant without restriction
-                            if is_super or requested_int in jwt_tenant_ids:
-                                tenant_id = requested_int
-                            else:
-                                from fastapi.responses import JSONResponse
-                                return JSONResponse(
-                                    status_code=403,
-                                    content={"success": False, "message": f"Access to tenant {requested_tid} is not permitted."}
-                                )
-                        else:
-                            # No explicit tenant → use primary
-                            tenant_id = jwt_primary
-
-            # Priority 3: Domain (Fallback)
-            if not tenant_id:
-                host = request.headers.get("host")
-                if host:
-                    # 1. Try full host (includes port, e.g. 127.0.0.1:8000)
-                    tenant = TenantService.get_tenant_by_domain(db, host)
-                    if tenant:
-                        tenant_id = tenant.id
+                    # Admin paths require JWT first
+                    auth_header = request.headers.get("Authorization")
+                    token = None
+                    if auth_header and auth_header.startswith("Bearer "):
+                        token = auth_header.split(" ")[1]
                     else:
-                        # 2. Try host without port (e.g. localhost)
-                        domain = host.split(":")[0]
-                        tenant = TenantService.get_tenant_by_domain(db, domain)
-                        if tenant:
-                            tenant_id = tenant.id
+                        token = request.query_params.get("token") # WebSockets
 
-            # Case: Identification Succeeded
-            if tenant_id:
-                # ── Diagnostic Logging (CRITICAL for Debugging) ──────────
-                print(f"[TENANT] ID: {tenant_id} | Path: {request.url.path}")
+                    if token:
+                        payload = decode_access_token(token)
+                        if payload:
+                            # Mock a user object with JWT claims for the resolver
+                            user_id = payload.get("sub")
+                            if user_id:
+                                # We need enough of a user object for the resolver
+                                user = db.query(User).filter(User.id == int(user_id)).first()
+                                if user:
+                                    # Attach JWT claims
+                                    user._jwt_tenant_ids = payload.get("tenant_ids", [])
+                                    user._jwt_primary_tenant_id = payload.get("primary_tenant_id") or payload.get("tenant_id")
+                                    user._jwt_is_super_admin = payload.get("is_super_admin", False)
+                                    
+                                    tenant_id = TenantResolver.resolve_admin_tenant(db, request, user)
+            
+            except HTTPException as http_exc:
+                # Re-raise explicit security blocks
+                return JSONResponse(status_code=http_exc.status_code, content={"success": False, "message": http_exc.detail})
                 
-                # ── Tenant-Scoped Rate Limiting ────────────────────────────
-                now = datetime.now()
-                window_start = now - timedelta(seconds=RATE_LIMIT_WINDOW)
-                
-                # Filter old requests
-                history = tenant_request_history[tenant_id]
-                tenant_request_history[tenant_id] = [ts for ts in history if ts > window_start]
-                
-                if len(tenant_request_history[tenant_id]) >= MAX_REQUESTS_PER_WINDOW:
-                    from fastapi.responses import JSONResponse
-                    logger.warning(f"RATE LIMIT: Tenant {tenant_id} exceeded {MAX_REQUESTS_PER_WINDOW} req/{RATE_LIMIT_WINDOW}s")
-                    return JSONResponse(
-                        status_code=429, 
-                        content={"success": False, "message": "Rate limit exceeded for this tenant. Please try again later."}
-                    )
-                
-                tenant_request_history[tenant_id].append(now)
-
-            # Store in request state for downstream logic
+            # 5. Store in request state
             request.state.tenant_id = tenant_id
             
-            # ── Strict Path Protection ──────────────────────────────────────
-            # Require tenant for chat, admin, and bot-config endpoints
-            protected_paths = ["/chat", "/admin", "/bot-config", "/leads", "/intents", "/users", "/roles", "/sales"]
-            is_protected = any(request.url.path.startswith(p) for p in protected_paths)
+            # 6. Strict Path Protection (Final Check)
+            # Exclusion list: health checks, core auth, static assets, and documentation
+            exempt_paths = ["/health", "/", "/debug-logs", "/debug-db", "/favicon.ico"]
+            is_exempt = request.url.path in exempt_paths or \
+                        request.url.path.startswith("/auth") or \
+                        request.url.path.startswith("/static") or \
+                        request.url.path.startswith("/docs") or \
+                        request.url.path.startswith("/openapi.json") or \
+                        request.url.path.startswith("/redoc")
             
-            # Auth endpoints handled by their own logic, but require tenant context if possible
-            if is_protected and not tenant_id and not request.url.path.startswith("/auth"):
-                from fastapi.responses import JSONResponse
+            if not tenant_id and not is_exempt:
                 logger.error(f"SECURITY BLOCK: No tenant identified for {request.url.path}")
                 return JSONResponse(
                     status_code=403, 
-                    content={"success": False, "message": "Invalid or missing tenant context. Access denied."}
+                    content={"success": False, "message": "Tenant requirement not met. Access denied."}
                 )
-            
+
+            # 7. Rate Limiting (Public Only)
+            if is_public and tenant_id:
+                client_ip = request.client.host
+                rate_limit_key = f"{tenant_id}:{client_ip}"
+                
+                now = datetime.now()
+                window_start = now - timedelta(seconds=RATE_LIMIT_WINDOW)
+                
+                # Get or init history
+                if rate_limit_key not in tenant_request_history:
+                    tenant_request_history[rate_limit_key] = []
+                
+                history = tenant_request_history[rate_limit_key]
+                tenant_request_history[rate_limit_key] = [ts for ts in history if ts > window_start]
+                
+                if len(tenant_request_history[rate_limit_key]) >= MAX_REQUESTS_PER_WINDOW:
+                    logger.warning(f"RATE LIMIT: {rate_limit_key} exceeded limit.")
+                    return JSONResponse(status_code=429, content={"success": False, "message": "Rate limit exceeded. Please try again later."})
+                
+                tenant_request_history[rate_limit_key].append(now)
+
+
             return await call_next(request)
+        except Exception as e:
+            logger.exception(f"Unhandled error in tenant_middleware: {str(e)}")
+            return JSONResponse(status_code=500, content={"success": False, "message": "Internal server error during tenant resolution."})
         finally:
             db.close()
+
+
 
     # ── Request Logging Middleware ──────────────────────────────────
 

@@ -78,10 +78,15 @@ async def submit_lead(
         
         _submission_track[client_ip].append(now)
 
-        # 1. Get Session & Tenant (if possible)
+        # 1. Get Session & Tenant (Strictly from Request State)
         session_id = request.cookies.get(settings.SESSION_COOKIE_NAME)
         chat_session = None
-        current_tenant_id = request.state.tenant_id or settings.DEFAULT_TENANT_ID
+        
+        # 🔥 SENIOR FIX: Never fallback to default if middleware failed to resolve
+        current_tenant_id = request.state.tenant_id
+        if not current_tenant_id:
+             raise HTTPException(status_code=403, detail="Tenant context required for lead submission.")
+
 
         # Priority 1: Use visitor_uuid from body
         if lead_req.visitor_uuid:
@@ -220,9 +225,17 @@ async def submit_lead(
                     "created_at_ist": system_msg.created_at_ist
                 }
             )
+            # 🔥 Audit Logging
+            from app.services.audit_service import AuditService
+            AuditService.log_action(db, "LEAD_CREATED", current_tenant_id, target_user_id=None)
+            
             logger.info(f"Updated session {chat_session.session_id} with lead {lead.id}")
         else:
+            # Create lead without session context? We should still log it.
+            from app.services.audit_service import AuditService
+            AuditService.log_action(db, "LEAD_CREATED_WITHOUT_SESSION", current_tenant_id)
             logger.warning("No session_id cookie found during lead submission")
+
 
         # 4. 🔥 CONFIRMATION EMAIL: Send in background
         background_tasks.add_task(
@@ -287,15 +300,19 @@ def get_leads(
     Super Admins can filter by any tenant_id using target_tenant_id.
     """
     # 1. Determine Tenant Context
-    is_super = getattr(current_user, 'is_super_admin', False) or getattr(current_user, '_jwt_is_super_admin', False)
+    from app.core.db_utils import verify_tenant_access
     
-    # If superadmin and target_tenant_id provided, use it. 
-    # Otherwise fallback to user's primary tenant_id.
-    effective_tenant_id = current_user.tenant_id
-    if is_super and target_tenant_id is not None:
-        effective_tenant_id = target_tenant_id
+    is_super = getattr(current_user, 'is_super_admin', False) or getattr(current_user, '_jwt_is_super_admin', False)
+    jwt_authorized_ids = getattr(current_user, '_jwt_tenant_ids', [current_user.tenant_id])
+    
+    # Use target_tenant_id if provided (and authorized), else fallback to primary
+    effective_tenant_id = target_tenant_id if target_tenant_id is not None else current_user.tenant_id
+    
+    # 🚨 SECURITY: Verify user has access to this specific tenant
+    verify_tenant_access(jwt_authorized_ids, effective_tenant_id, is_super)
 
     leads, total = lead_service.get_filtered_leads(
+
         db,
         tenant_id=effective_tenant_id,
         search=search,
