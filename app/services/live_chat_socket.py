@@ -96,7 +96,7 @@ class LiveChatSocketManager:
         }, tenant_id=tenant_id)
 
     async def notify_message(self, message, session, tenant_id: int):
-        """Notify agents of new message."""
+        """Notify agents and the visitor of a new message."""
         message_data = {
             'type': 'NEW_MESSAGE',
             'id': message.id,
@@ -107,15 +107,35 @@ class LiveChatSocketManager:
             'created_at_ist': format_ist_datetime(message.created_at),
         }
         
+        # 1. Update all agent dashboards
         await self._broadcast_to_dashboard(message_data, tenant_id=tenant_id)
 
+        # 2. ALSO relay to the visitor's personal WebSocket if it's an agent message
+        if message.message_type == "agent":
+            await manager.send_to_client(session.visitor_uuid, {
+                "type": "message",
+                "message": message.message_text,
+                "sender": "agent",
+                "purpose": "chatbot",
+                "agent_name": message.sender_name or "Agent",
+                "client_msg_id": f"srv-{message.id}"
+            })
+
     async def notify_typing(self, visitor_uuid: str, is_typing: bool, tenant_id: int):
-        """Notify agents of typing status."""
+        """Notify agents and the visitor of typing status."""
+        # 1. Update all agent dashboards
         await self._broadcast_to_dashboard({
             'type': 'TYPING_STATUS',
             'session_id': visitor_uuid,
             'is_typing': is_typing
         }, tenant_id=tenant_id)
+
+        # 2. ALSO relay to the visitor's personal WebSocket
+        await manager.send_to_client(visitor_uuid, {
+            "type": "typing",
+            "is_typing": is_typing,
+            "purpose": "chatbot"
+        })
 
     async def _broadcast_to_dashboard(self, data: dict, tenant_id: int = None):
         """Broadcast data to dashboard using tenant-aware WebSocket infrastructure."""

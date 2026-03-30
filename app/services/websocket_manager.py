@@ -49,8 +49,11 @@ class ConnectionManager:
         if ws:
             try:
                 await ws.send_json(data)
-            except Exception:
+            except Exception as e:
+                logger.error(f"❌ [WS] Failed to send to client {session_id}: {e}")
                 self.disconnect_client(session_id)
+        else:
+            logger.warning(f"⚠️ [WS] No active socket for client {session_id}. Message buffered or dropped.")
 
     async def send_to_agent(self, session_id: str, data: dict):
         session_id = session_id.lower()

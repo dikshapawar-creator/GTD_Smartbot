@@ -74,6 +74,7 @@ def login(login_req: LoginRequest, db: Session = Depends(get_db)):
         "user": {
             "id": user.id,
             "email": user.email,
+            "full_name": user.full_name,
             "role": user.role.name,
             "role_level": user.role.level,
             "tenant_id": user.tenant_id,

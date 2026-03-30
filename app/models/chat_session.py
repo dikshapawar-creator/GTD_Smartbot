@@ -87,7 +87,16 @@ class ChatSession(Base):
     # Agent Assignment
     agent_name = Column(String(255), nullable=True)
     assigned_agent_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    assigned_agent_email = Column(String(255), nullable=True)
+    assigned_agent_name = Column(String(255), nullable=True)
     assigned_at = Column(DateTime, nullable=True)
+    agent_joined_at = Column(DateTime, nullable=True)
+
+    # Closing Agent Info
+    closed_by_agent_id = Column(Integer, nullable=True)
+    closed_by_agent_email = Column(String(255), nullable=True)
+    closed_by_agent_name = Column(String(255), nullable=True)
+    agent_closed_at = Column(DateTime, nullable=True)
 
     # Concurrency & Soft Delete
     version = Column(Integer, default=1, nullable=False) # Optimistic Locking

@@ -22,6 +22,11 @@ class ChatMessage(Base):
 
     message_text = Column(Text, nullable=False)
 
+    # Sender Attribution (for Agent Tracking)
+    sender_user_id = Column(Integer, nullable=True) # ID of the agent (from users table)
+    sender_name = Column(String(255), nullable=True)
+    sender_email = Column(String(255), nullable=True)
+
     # Dual timestamps
     created_at = Column(DateTime, nullable=False, index=True)
     created_at_utc = Column(DateTime, nullable=False, index=True)

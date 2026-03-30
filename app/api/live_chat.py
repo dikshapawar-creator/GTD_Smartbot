@@ -48,6 +48,10 @@ async def get_conversations(
             "session_status": session.session_status,
             "current_mode": session.current_mode,
             "agent_name": session.agent_name,
+            "assigned_agent_id": session.assigned_agent_id,
+            "assigned_agent_email": session.assigned_agent_email,
+            "assigned_agent_name": session.assigned_agent_name,
+            "agent_joined_at": session.agent_joined_at.isoformat() if session.agent_joined_at else None,
             "is_locked": session.is_locked,
             "is_online": manager.has_client(session.visitor_uuid),
             "lead_name": session.lead_name or f"Visitor #{session.visitor_uuid[-6:].upper()}",
@@ -160,6 +164,9 @@ async def get_messages(
             "session_id": session_uuid,
             "message_type": msg.message_type,
             "message_text": msg.message_text,
+            "sender_user_id": msg.sender_user_id,
+            "sender_name": msg.sender_name,
+            "sender_email": msg.sender_email,
             "created_at_utc": msg.created_at.isoformat() if msg.created_at else None,
             "created_at_ist": format_ist_datetime(msg.created_at),
         })
@@ -184,7 +191,7 @@ async def intervene_session(
             and_(
                 ChatSession.visitor_uuid == session_uuid,
                 ChatSession.tenant_id == tenant_id,
-                ChatSession.session_status.in_(["ACTIVE", "BOT"])
+                ChatSession.session_status.in_([SessionStatus.ACTIVE, SessionStatus.BOT])
             )
         )
         .order_by(ChatSession.last_activity_at.desc())
@@ -200,9 +207,13 @@ async def intervene_session(
     session.current_mode = ConversationMode.HUMAN
     session.conversation_mode = ConversationMode.HUMAN
     session.session_status = SessionStatus.ACTIVE
-    session.agent_name = current_user.email or "Agent"  # Use direct attribute access
+    session.agent_name = current_user.full_name or current_user.email or "Agent"
+    session.assigned_agent_id = current_user.id
+    session.assigned_agent_email = current_user.email
+    session.assigned_agent_name = current_user.full_name
     session.is_locked = True
     session.agent_joined = True
+    session.agent_joined_at = datetime.utcnow()
     session.last_activity_at = datetime.utcnow()
     session.last_activity_utc = datetime.utcnow()
     
@@ -252,12 +263,15 @@ async def send_message(
     if not session:
         raise HTTPException(status_code=404, detail="Active session not found")
     
-    # Create message - fix the foreign key issue
+    # Create message
     message = ChatMessage(
-        session_id=session.session_id,  # Use session_id (string) not id (BigInteger)
-        session_uuid=session.visitor_uuid,
+        tenant_id=session.tenant_id,
+        session_id=session.session_id,
         message_type="agent",
         message_text=message_data.get("message", ""),
+        sender_user_id=current_user.id,
+        sender_name=current_user.full_name,
+        sender_email=current_user.email,
         created_at=datetime.utcnow(),
         created_at_utc=datetime.utcnow(),
         created_at_local=datetime.utcnow()
@@ -319,6 +333,10 @@ async def close_session(
     session.session_status = SessionStatus.CLOSED
     session.is_locked = False
     session.agent_joined = False
+    session.closed_by_agent_id = current_user.id
+    session.closed_by_agent_email = current_user.email
+    session.closed_by_agent_name = current_user.full_name
+    session.agent_closed_at = datetime.utcnow()
     session.last_activity_at = datetime.utcnow()
     session.last_activity_utc = datetime.utcnow()
     session.ended_at_utc = datetime.utcnow()
@@ -507,6 +525,14 @@ def format_session_for_crm(session: ChatSession) -> dict:
         "session_status": session.session_status,
         "current_mode": session.current_mode,
         "agent_name": session.agent_name,
+        "assigned_agent_id": session.assigned_agent_id,
+        "assigned_agent_email": session.assigned_agent_email,
+        "assigned_agent_name": session.assigned_agent_name,
+        "agent_joined_at": session.agent_joined_at.isoformat() if session.agent_joined_at else None,
+        "closed_by_agent_id": session.closed_by_agent_id,
+        "closed_by_agent_email": session.closed_by_agent_email,
+        "closed_by_agent_name": session.closed_by_agent_name,
+        "agent_closed_at": session.agent_closed_at.isoformat() if session.agent_closed_at else None,
         "is_locked": session.is_locked,
         "is_online": manager.has_client(session.visitor_uuid),
         "lead_name": getattr(session.lead, 'name', None) or session.lead_name or f"Visitor #{session.visitor_uuid[-6:].upper()}",
@@ -620,7 +646,7 @@ def consolidate_visitor_sessions(db: Session, visitor_uuid: str, tenant_id: int)
         .where(
             ChatSession.visitor_uuid == visitor_uuid,
             ChatSession.tenant_id == tenant_id,
-            ChatSession.session_status == 'active',
+                ChatSession.session_status.in_([SessionStatus.ACTIVE, SessionStatus.BOT, SessionStatus.HUMAN]),
             ChatSession.is_deleted == False
         )
         .order_by(ChatSession.created_at.desc())
