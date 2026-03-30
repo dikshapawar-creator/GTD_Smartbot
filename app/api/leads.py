@@ -1,12 +1,13 @@
 
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from typing import List, Optional
 
 from uuid import UUID
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from app.core.dependencies import get_db
 from app.core.config import settings
@@ -290,7 +291,7 @@ def get_leads(
     sort_order: str = "desc",
     target_tenant_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(2))
+    current_user: User = Depends(require_role(1))
 ):
     """
     Scalable CRM endpoint for lead management.
@@ -336,12 +337,100 @@ def get_leads(
     }
 
 
+@router.get("/export", summary="Export leads to CSV")
+def export_leads_csv(
+    request: Request,
+    search: Optional[str] = None,
+    status: Optional[str] = None,
+    country: Optional[str] = None,
+    trade_type: Optional[str] = None,
+    product: Optional[str] = None,
+    source: Optional[str] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    target_tenant_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(1))
+):
+    """Export filtered leads to a downloadable CSV file."""
+    import csv
+    import io
+    from fastapi.responses import StreamingResponse
+    from app.core.db_utils import verify_tenant_access
+
+    is_super = getattr(current_user, 'is_super_admin', False) or getattr(current_user, '_jwt_is_super_admin', False)
+    jwt_authorized_ids = getattr(current_user, '_jwt_tenant_ids', [current_user.tenant_id])
+    effective_tenant_id = target_tenant_id if target_tenant_id is not None else current_user.tenant_id
+    verify_tenant_access(jwt_authorized_ids, effective_tenant_id, is_super)
+
+    leads, _ = lead_service.get_filtered_leads(
+        db,
+        tenant_id=effective_tenant_id,
+        search=search,
+        status=status,
+        country=country,
+        trade_type=trade_type,
+        product=product,
+        source=source,
+        start_date=start_date,
+        end_date=end_date,
+        page=1,
+        limit=10000,  # High limit for full export
+        sort_by="created_at",
+        sort_order="desc"
+    )
+
+    def generate():
+        output = io.StringIO()
+        writer = csv.writer(output)
+        # Header row
+        writer.writerow([
+            "ID", "Name", "Company", "Email", "Phone",
+            "Status", "Trade Type", "Country Interested", "Product",
+            "Source", "IP Address", "Country", "City", "Browser", "OS",
+            "Created At"
+        ])
+        yield output.getvalue()
+        output.truncate(0)
+        output.seek(0)
+
+        for lead in leads:
+            writer.writerow([
+                str(lead.id or ""),
+                lead.name or "",
+                lead.company or "",
+                lead.email or "",
+                lead.phone or "",
+                lead.status or "",
+                lead.trade_type or "",
+                lead.country_interested or "",
+                lead.product or "",
+                lead.source or "",
+                "",  # ip_address not in Lead model directly
+                "",  # country not in Lead model directly
+                "",  # city not in Lead model directly
+                "",  # browser not in Lead model directly
+                "",  # os not in Lead model directly
+                lead.created_at.isoformat() if lead.created_at else "",
+            ])
+            yield output.getvalue()
+            output.truncate(0)
+            output.seek(0)
+
+    filename = f"leads_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    return StreamingResponse(
+        generate(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
 
 @router.get("/{id}", response_model=LeadResponse, summary="Get lead by ID")
 def get_lead(
     id: UUID, 
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(2))
+    current_user: User = Depends(require_role(1))
 ):
     lead = db.query(Lead).filter(
         Lead.id == id, 
@@ -359,7 +448,7 @@ async def update_lead_status(
     id: UUID, 
     update_req: StatusUpdateRequest, 
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(2))
+    current_user: User = Depends(require_role(1))
 ):
     """
     Update lead status using controlled lifecycle transitions.
@@ -412,7 +501,7 @@ def get_lead_history(
 def get_conversations(
     leadId: UUID, 
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(2))
+    current_user: User = Depends(require_role(1))
 ):
     """
     Retrieve all messages associated with a lead by joining sessions.

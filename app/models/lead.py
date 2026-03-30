@@ -27,7 +27,9 @@ class LeadStatus(str, enum.Enum):
     IN_PROGRESS = "IN_PROGRESS"
     QUALIFIED = "QUALIFIED"
     CLOSED = "CLOSED"
-    COMPLETE = "COMPLETE"  # Missing status found in database records
+    COMPLETE = "COMPLETE"
+    DEAD_LEAD = "DEAD_LEAD"
+    WRONG_LEAD = "WRONG_LEAD"
 
 
 class Lead(Base):
@@ -63,10 +65,10 @@ class Lead(Base):
     source  = Column(String(50),  nullable=False, default="chatbot")
 
 
-    # ── Status lifecycle (Enum Enforced) ──────────────────────────────────
+    # ── Status lifecycle (Flexible String — allows new values without migration) ──
     status = Column(
-        Enum(LeadStatus, name="lead_status"),
-        default=LeadStatus.NEW,
+        String(50),
+        default=LeadStatus.NEW.value,
         nullable=False
     )
 

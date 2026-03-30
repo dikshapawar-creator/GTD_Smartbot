@@ -11,12 +11,15 @@ from app.services.audit_service import AuditService
 logger = logging.getLogger(__name__)
 
 # ── Lifecycle Rules ────────────────────────────────────────────────────────
-# NEW → IN_PROGRESS → QUALIFIED → CLOSED
-ALLOWED_TRANSITIONS = {
-    LeadStatus.NEW: [LeadStatus.IN_PROGRESS, LeadStatus.CLOSED],
-    LeadStatus.IN_PROGRESS: [LeadStatus.QUALIFIED, LeadStatus.CLOSED],
-    LeadStatus.QUALIFIED: [LeadStatus.CLOSED],
-    LeadStatus.CLOSED: [LeadStatus.IN_PROGRESS]  # Allow reopening if needed
+# Updated transitions — use raw string values since status column is now String(50)
+ALLOWED_TRANSITIONS: dict = {
+    "NEW": ["IN_PROGRESS", "CLOSED", "DEAD_LEAD", "WRONG_LEAD"],
+    "IN_PROGRESS": ["QUALIFIED", "CLOSED", "DEAD_LEAD", "WRONG_LEAD"],
+    "QUALIFIED": ["CLOSED", "DEAD_LEAD"],
+    "CLOSED": ["IN_PROGRESS"],
+    "COMPLETE": ["IN_PROGRESS", "CLOSED"],
+    "DEAD_LEAD": ["NEW", "IN_PROGRESS"],
+    "WRONG_LEAD": ["NEW"],
 }
 
 

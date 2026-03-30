@@ -1,9 +1,10 @@
 import logging
 from fastapi import APIRouter, Depends, HTTPException, status, Request
+from sqlalchemy import select, and_, or_, func, text
 from app.core.tenant_resolver import TenantResolver
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.db.session import get_db
 from app.services.live_chat_socket import get_live_chat_socket
@@ -112,15 +113,14 @@ async def get_messages(
 ):
     """Get messages for a specific session."""
     tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
-    # Find the most recent active session by visitor UUID
-    from sqlalchemy import select, and_
+    # Find the most recent session by visitor UUID (active or ended)
     stmt = (
         select(ChatSession)
         .where(
             and_(
                 ChatSession.visitor_uuid == session_uuid,
                 ChatSession.tenant_id == tenant_id,
-                ChatSession.session_status.in_([SessionStatus.ACTIVE, SessionStatus.CLOSED])  # Include closed sessions for message history
+                ChatSession.is_deleted == False  # Include any non-deleted session for message history
             )
         )
         .order_by(ChatSession.last_activity_at.desc())
@@ -620,7 +620,8 @@ def consolidate_visitor_sessions(db: Session, visitor_uuid: str, tenant_id: int)
         .where(
             ChatSession.visitor_uuid == visitor_uuid,
             ChatSession.tenant_id == tenant_id,
-            ChatSession.session_status == SessionStatus.ACTIVE
+            ChatSession.session_status == 'active',
+            ChatSession.is_deleted == False
         )
         .order_by(ChatSession.created_at.desc())
     )
@@ -639,7 +640,7 @@ def consolidate_visitor_sessions(db: Session, visitor_uuid: str, tenant_id: int)
         logger.info(f"Consolidating sessions for visitor {visitor_uuid}. Keeping {keep_session.session_id}, closing {len(duplicate_sessions)} others.")
         
         for duplicate in duplicate_sessions:
-            duplicate.session_status = SessionStatus.CLOSED
+            duplicate.session_status = 'ended'  # Raw string value matching DB column
             duplicate.ended_at_utc = datetime.utcnow()
             duplicate.ended_at_local = datetime.utcnow()
         
@@ -662,18 +663,20 @@ async def get_history(
 ):
     """Get paginated conversation history."""
     tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
-    from sqlalchemy import select, and_, func
-    from datetime import datetime
+    logger.info(f"FETCH_HISTORY: tenant_id={tenant_id}, status_filter={status_filter}, date_from={date_from}, date_to={date_to}")
     
-    # Build base query
-    conditions = [ChatSession.tenant_id == tenant_id]
+    # Build base query — always filter by tenant and exclude soft-deleted sessions
+    conditions = [
+        ChatSession.tenant_id == tenant_id,
+        ChatSession.is_deleted == False
+    ]
     
-    # Status filter
-    if status_filter and status_filter != 'ALL':
-        if status_filter == 'ACTIVE':
-            conditions.append(ChatSession.session_status == SessionStatus.ACTIVE)
-        elif status_filter == 'CLOSED':
-            conditions.append(ChatSession.session_status == SessionStatus.CLOSED)
+    # Status filter — handle both 'ALL' and 'all'
+    if status_filter and status_filter.upper() != 'ALL':
+        if status_filter.lower() == 'active':
+            conditions.append(ChatSession.session_status == 'active')
+        elif status_filter.lower() == 'ended':
+            conditions.append(ChatSession.session_status == 'ended')
     
     # Date filters
     if date_from:
@@ -696,6 +699,7 @@ async def get_history(
         count_stmt = count_stmt.where(and_(*conditions))
     
     total = db.execute(count_stmt).scalar()
+    logger.info(f"FETCH_HISTORY: Total record count found: {total}")
     
     # Get paginated results
     stmt = (
@@ -733,8 +737,8 @@ async def get_session_detail(
     current_user = Depends(get_current_user)
 ):
     """Get detailed session information."""
+    """Get detailed session information."""
     tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
-    from sqlalchemy import select, String
     import logging
     
     logger = logging.getLogger(__name__)
@@ -823,8 +827,7 @@ async def cleanup_empty_sessions_endpoint(
 ):
     """Cleanup empty sessions endpoint."""
     tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
-    from datetime import datetime, timedelta
-    from sqlalchemy import select, and_
+    # Remove sessions with no messages and older than 1 hour
     
     # Remove sessions with no messages and older than 1 hour
     cutoff_time = datetime.utcnow() - timedelta(hours=1)
