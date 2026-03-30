@@ -43,6 +43,29 @@ def login(login_req: LoginRequest, db: Session = Depends(get_db)):
     access_token, refresh_token = AuthService.create_session(db, user)
     expires_in = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60  # convert to seconds
     
+    from app.models.auth import Tenant
+    if user.is_super_admin:
+        all_tenants = db.query(Tenant).filter(Tenant.is_active == True).all()
+        tenant_access = [
+            {
+                "tenant_id": t.id,
+                "tenant_name": t.name,
+                "status": t.is_active,
+                "is_primary": t.id == user.tenant_id
+            } for t in all_tenants
+        ]
+        tenant_ids = [t.id for t in all_tenants]
+    else:
+        tenant_access = [
+            {
+                "tenant_id": ut.tenant_id,
+                "tenant_name": ut.tenant.name if ut.tenant else str(ut.tenant_id),
+                "status": ut.status,
+                "is_primary": ut.is_primary
+            } for ut in user.user_tenants
+        ] if user.user_tenants else []
+        tenant_ids = [ut.tenant_id for ut in user.user_tenants if ut.status] if user.user_tenants else [user.tenant_id]
+
     return {
         "access_token": access_token,
         "refresh_token": refresh_token,
@@ -54,17 +77,10 @@ def login(login_req: LoginRequest, db: Session = Depends(get_db)):
             "role": user.role.name,
             "role_level": user.role.level,
             "tenant_id": user.tenant_id,
-            "tenant_ids": [ut.tenant_id for ut in user.user_tenants if ut.status] if user.user_tenants else [user.tenant_id],
+            "tenant_ids": tenant_ids,
             "primary_tenant_id": next((ut.tenant_id for ut in user.user_tenants if ut.is_primary), user.tenant_id) if user.user_tenants else user.tenant_id,
             "is_super_admin": user.is_super_admin,
-            "tenant_access": [
-                {
-                    "tenant_id": ut.tenant_id,
-                    "tenant_name": ut.tenant.name if ut.tenant else str(ut.tenant_id),
-                    "status": ut.status,
-                    "is_primary": ut.is_primary
-                } for ut in user.user_tenants
-            ] if user.user_tenants else []
+            "tenant_access": tenant_access
         }
     }
 
@@ -97,6 +113,34 @@ def reset_password(req: ResetPasswordRequest, db: Session = Depends(get_db)):
     return {"message": "Password successfully reset. Please log in with your new password."}
 
 @router.get("/me", response_model=UserResponse)
-def get_me(current_user: User = Depends(get_current_user)):
+def get_me(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Get current authenticated user's profile."""
+    if current_user.is_super_admin:
+        # Dynamically inject all active tenants for super admins
+        from app.models.auth import Tenant
+        all_tenants = db.query(Tenant).filter(Tenant.is_active == True).all()
+        
+        # We construct a dictionary matching UserResponse because we shouldn't mutate the db object's relationship
+        user_dict = {
+            "id": current_user.id,
+            "email": current_user.email,
+            "is_active": current_user.is_active,
+            "full_name": current_user.full_name,
+            "tenant_id": current_user.tenant_id,
+            "is_super_admin": current_user.is_super_admin,
+            "role": current_user.role,
+            "token_version": current_user.token_version,
+            "created_at": current_user.created_at,
+            "updated_at": current_user.updated_at,
+            "tenant_access": [
+                {
+                    "tenant_id": t.id,
+                    "tenant_name": t.name,
+                    "status": t.is_active,
+                    "is_primary": t.id == current_user.tenant_id
+                } for t in all_tenants
+            ]
+        }
+        return user_dict
+    
     return current_user

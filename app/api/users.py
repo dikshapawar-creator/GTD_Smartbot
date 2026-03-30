@@ -9,6 +9,7 @@ from app.schemas.user import (
     AssignTenantsRequest, TenantStatusUpdate, UserTenantRead
 )
 from app.services.user_tenant_service import UserTenantService
+from app.services.user_service import UserService
 from app.core.db_utils import verify_tenant_access, apply_tenant_filter
 from app.services.audit_service import AuditService
 
@@ -101,6 +102,7 @@ async def deactivate_user(
 
 
 @router.put("/{id}", response_model=UserResponse)
+@router.patch("/{id}", response_model=UserResponse)
 async def update_user(
     id: int,
     user_in: UserUpdate,

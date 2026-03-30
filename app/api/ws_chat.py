@@ -34,6 +34,7 @@ legacy_router = APIRouter(tags=["Legacy WebSocket"]) # No prefix
 async def websocket_crm_updates(
     websocket: WebSocket,
     token: str = Query(...),
+    tenant_id: Optional[int] = Query(None),
 ):
     """
     Global WebSocket for CRM dashboard updates (Intents, Leads, Users).
@@ -63,6 +64,21 @@ async def websocket_crm_updates(
             return
 
         user_tenant_id = agent.tenant_id
+        if tenant_id:
+            if agent.is_super_admin:
+                user_tenant_id = tenant_id
+            else:
+                from app.models.auth import UserTenant
+                has_access = db.query(UserTenant).filter(
+                    UserTenant.user_id == agent.id, 
+                    UserTenant.tenant_id == tenant_id, 
+                    UserTenant.status == True
+                ).first()
+                if has_access:
+                    user_tenant_id = tenant_id
+                else:
+                    await websocket.close(code=4003, reason="Access denied for this workspace")
+                    return
         
         # Register with core socket manager for tenant broadcasts
         from app.core.socket_manager import socket_manager

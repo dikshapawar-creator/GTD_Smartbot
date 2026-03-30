@@ -190,7 +190,7 @@ class ChatbotService:
         fallback_msg = ChatbotService._get_dynamic_response(
             db, 
             "FALLBACK_GENERIC", 
-            "Thank you. We will arrange a call for you shortly.\n\nYou can discuss all your questions with our team during the meeting.\n\nRegarding your data and requirements, our team will provide you with the appropriate solution.",
+            "Thank you for reaching out. A representative will be with you shortly to assist you further.",
             chat_session.tenant_id
         )
         

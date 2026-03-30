@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from typing import Optional, List
 
@@ -7,6 +7,7 @@ from app.models.intent_config import IntentConfig
 from app.schemas.intents import IntentConfigCreate, IntentConfigRead, IntentConfigUpdate
 from app.api.deps import require_role
 from app.models.auth import User
+from app.core.tenant_resolver import TenantResolver
 from app.core.db_utils import verify_tenant_access
 from app.services.audit_service import AuditService
 
@@ -15,18 +16,12 @@ router = APIRouter(prefix="/intents", tags=["Intent Management"])
 
 @router.get("/", response_model=List[IntentConfigRead])
 def list_intents(
-    tenant_id: Optional[int] = None,
+    request: Request,
     db: Session = Depends(get_db), 
     current_user: User = Depends(require_role(2))
 ):
-    """List all intent configurations. Super-Admins can specify a tenant_id."""
-    is_super = getattr(current_user, 'is_super_admin', False) or getattr(current_user, '_jwt_is_super_admin', False)
-    jwt_authorized_ids = getattr(current_user, '_jwt_tenant_ids', [current_user.tenant_id])
-    
-    target_tenant_id = tenant_id if (is_super and tenant_id) else current_user.tenant_id
-    
-    # 🚨 SECURITY: Verify user has access to this specific tenant
-    verify_tenant_access(jwt_authorized_ids, target_tenant_id, is_super)
+    """List all intent configurations. Tenant is resolved securely via headers/token."""
+    target_tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
     
     return db.query(IntentConfig).filter(IntentConfig.tenant_id == target_tenant_id).all()
 
@@ -34,14 +29,12 @@ def list_intents(
 @router.get("/{intent_key}", response_model=IntentConfigRead)
 def get_intent(
     intent_key: str, 
-    tenant_id: Optional[int] = None,
+    request: Request,
     db: Session = Depends(get_db), 
     current_user: User = Depends(require_role(2))
 ):
-    """Retrieve a specific intent. Super-Admins can specify a tenant_id."""
-    target_tenant_id = current_user.tenant_id
-    if current_user.is_super_admin and tenant_id:
-        target_tenant_id = tenant_id
+    """Retrieve a specific intent. Tenant is resolved securely via headers/token."""
+    target_tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
 
     intent = db.query(IntentConfig).filter(
         IntentConfig.intent_key == intent_key,
@@ -54,14 +47,12 @@ def get_intent(
 @router.post("/", response_model=IntentConfigRead, status_code=status.HTTP_201_CREATED)
 async def create_intent(
     intent_in: IntentConfigCreate, 
-    tenant_id: Optional[int] = None,
+    request: Request,
     db: Session = Depends(get_db), 
     current_user: User = Depends(require_role(2))
 ):
-    """Create a new intent configuration. Super-Admins can specify a tenant_id."""
-    target_tenant_id = current_user.tenant_id
-    if current_user.is_super_admin and tenant_id:
-        target_tenant_id = tenant_id
+    """Create a new intent configuration. Tenant is resolved securely via headers/token."""
+    target_tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
 
     existing = db.query(IntentConfig).filter(
         IntentConfig.intent_key == intent_in.intent_key,
@@ -103,14 +94,12 @@ async def create_intent(
 async def update_intent(
     intent_key: str, 
     intent_in: IntentConfigUpdate, 
-    tenant_id: Optional[int] = None,
+    request: Request,
     db: Session = Depends(get_db), 
     current_user: User = Depends(require_role(2))
 ):
-    """Update an existing intent. Super-Admins can specify a tenant_id."""
-    target_tenant_id = current_user.tenant_id
-    if current_user.is_super_admin and tenant_id:
-        target_tenant_id = tenant_id
+    """Update an existing intent. Tenant is resolved securely via headers/token."""
+    target_tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
 
     intent = db.query(IntentConfig).filter(
         IntentConfig.intent_key == intent_key,
@@ -156,14 +145,12 @@ async def update_intent(
 @router.delete("/{intent_key}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_intent(
     intent_key: str, 
-    tenant_id: Optional[int] = None,
+    request: Request,
     db: Session = Depends(get_db), 
     current_user: User = Depends(require_role(2))
 ):
-    """Delete an intent. Super-Admins can specify a tenant_id."""
-    target_tenant_id = current_user.tenant_id
-    if current_user.is_super_admin and tenant_id:
-        target_tenant_id = tenant_id
+    """Delete an intent. Tenant is resolved securely via headers/token."""
+    target_tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
 
     intent = db.query(IntentConfig).filter(
         IntentConfig.intent_key == intent_key,

@@ -1,5 +1,6 @@
 import logging
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
+from app.core.tenant_resolver import TenantResolver
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -24,11 +25,13 @@ def get_active_sessions_sync(db: Session, tenant_id: int) -> List[ChatSession]:
 
 @router.get("/conversations")
 async def get_conversations(
+    request: Request,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
     """Get all active conversations for the live chat dashboard."""
-    sessions = get_active_sessions_sync(db, tenant_id=current_user.tenant_id)
+    tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
+    sessions = get_active_sessions_sync(db, tenant_id=tenant_id)
     
     # Convert to frontend format
     conversations = []
@@ -74,11 +77,13 @@ async def get_conversations(
 
 @router.get("/analytics")
 async def get_analytics(
+    request: Request,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
     """Get live chat analytics."""
-    sessions = get_active_sessions_sync(db, tenant_id=current_user.tenant_id)
+    tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
+    sessions = get_active_sessions_sync(db, tenant_id=tenant_id)
     
     active_visitors = len([s for s in sessions if s.session_status == SessionStatus.ACTIVE])
     agent_chats = len([s for s in sessions if s.current_mode == ConversationMode.HUMAN])
@@ -99,12 +104,14 @@ async def get_analytics(
 @router.get("/messages/{session_uuid}")
 async def get_messages(
     session_uuid: str,
+    request: Request,
     page: int = 1,
     page_size: int = 100,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
     """Get messages for a specific session."""
+    tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
     # Find the most recent active session by visitor UUID
     from sqlalchemy import select, and_
     stmt = (
@@ -112,7 +119,7 @@ async def get_messages(
         .where(
             and_(
                 ChatSession.visitor_uuid == session_uuid,
-                ChatSession.tenant_id == current_user.tenant_id,
+                ChatSession.tenant_id == tenant_id,
                 ChatSession.session_status.in_([SessionStatus.ACTIVE, SessionStatus.CLOSED])  # Include closed sessions for message history
             )
         )
@@ -133,7 +140,7 @@ async def get_messages(
         .where(
             and_(
                 ChatSession.visitor_uuid == session.visitor_uuid,
-                ChatSession.tenant_id == current_user.tenant_id,
+                ChatSession.tenant_id == tenant_id,
                 ChatSession.is_deleted == False
             )
         )
@@ -163,10 +170,12 @@ async def get_messages(
 @router.post("/intervene/{session_uuid}")
 async def intervene_session(
     session_uuid: str,
+    request: Request,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
     """Agent takes over bot conversation."""
+    tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
     # Find the most recent active session by visitor UUID
     from sqlalchemy import select, and_
     stmt = (
@@ -174,7 +183,7 @@ async def intervene_session(
         .where(
             and_(
                 ChatSession.visitor_uuid == session_uuid,
-                ChatSession.tenant_id == current_user.tenant_id,
+                ChatSession.tenant_id == tenant_id,
                 ChatSession.session_status.in_(["ACTIVE", "BOT"])
             )
         )
@@ -216,10 +225,12 @@ async def intervene_session(
 async def send_message(
     session_uuid: str,
     message_data: Dict[str, Any],
+    request: Request,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
     """Send message as agent."""
+    tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
     # Find the most recent active session by visitor UUID
     from sqlalchemy import select, and_
     stmt = (
@@ -227,7 +238,7 @@ async def send_message(
         .where(
             and_(
                 ChatSession.visitor_uuid == session_uuid,
-                ChatSession.tenant_id == current_user.tenant_id,
+                ChatSession.tenant_id == tenant_id,
                 ChatSession.session_status == SessionStatus.ACTIVE
             )
 
@@ -277,10 +288,12 @@ async def send_message(
 @router.post("/close/{session_uuid}")
 async def close_session(
     session_uuid: str,
+    request: Request,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
     """Close a chat session."""
+    tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
     # Find the most recent active session by visitor UUID
     from sqlalchemy import select, and_
     stmt = (
@@ -288,7 +301,7 @@ async def close_session(
         .where(
             and_(
                 ChatSession.visitor_uuid == session_uuid,
-                ChatSession.tenant_id == current_user.tenant_id,
+                ChatSession.tenant_id == tenant_id,
                 ChatSession.session_status == SessionStatus.ACTIVE
             )
 
@@ -329,10 +342,12 @@ async def close_session(
 @router.post("/toggle-priority/{session_uuid}")
 async def toggle_priority(
     session_uuid: str,
+    request: Request,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
     """Toggle priority status of a session."""
+    tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
     # Find the most recent active session by visitor UUID
     from sqlalchemy import select, and_
     stmt = (
@@ -340,7 +355,7 @@ async def toggle_priority(
         .where(
             and_(
                 ChatSession.visitor_uuid == session_uuid,
-                ChatSession.tenant_id == current_user.tenant_id,
+                ChatSession.tenant_id == tenant_id,
                 ChatSession.session_status == SessionStatus.ACTIVE
             )
 
@@ -376,10 +391,12 @@ async def toggle_priority(
 @router.post("/toggle-spam/{session_uuid}")
 async def toggle_spam(
     session_uuid: str,
+    request: Request,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
     """Toggle spam flag of a session."""
+    tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
     # Find the most recent active session by visitor UUID
     from sqlalchemy import select, and_
     stmt = (
@@ -387,7 +404,7 @@ async def toggle_spam(
         .where(
             and_(
                 ChatSession.visitor_uuid == session_uuid,
-                ChatSession.tenant_id == current_user.tenant_id,
+                ChatSession.tenant_id == tenant_id,
                 ChatSession.session_status == SessionStatus.ACTIVE
             )
 
@@ -422,10 +439,12 @@ async def toggle_spam(
 @router.post("/block-visitor/{session_uuid}")
 async def block_visitor(
     session_uuid: str,
+    request: Request,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
     """Block a visitor and close their session."""
+    tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
     # Find the most recent active session by visitor UUID
     from sqlalchemy import select, and_
     stmt = (
@@ -433,7 +452,7 @@ async def block_visitor(
         .where(
             and_(
                 ChatSession.visitor_uuid == session_uuid,
-                ChatSession.tenant_id == current_user.tenant_id,
+                ChatSession.tenant_id == tenant_id,
                 ChatSession.session_status == SessionStatus.ACTIVE
             )
 
@@ -519,10 +538,12 @@ def format_session_for_crm(session: ChatSession) -> dict:
 
 @router.post("/cleanup-empty-sessions")
 async def cleanup_empty_sessions_endpoint(
+    request: Request,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
     """Clean up sessions with 0 messages (admin only)."""
+    tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
     from sqlalchemy import select, delete, func, update
     from datetime import datetime, timedelta
     
@@ -630,6 +651,7 @@ def consolidate_visitor_sessions(db: Session, visitor_uuid: str, tenant_id: int)
 
 @router.get("/history")
 async def get_history(
+    request: Request,
     page: int = 1,
     page_size: int = 25,
     status_filter: str = None,
@@ -639,11 +661,12 @@ async def get_history(
     current_user = Depends(get_current_user)
 ):
     """Get paginated conversation history."""
+    tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
     from sqlalchemy import select, and_, func
     from datetime import datetime
     
     # Build base query
-    conditions = []
+    conditions = [ChatSession.tenant_id == tenant_id]
     
     # Status filter
     if status_filter and status_filter != 'ALL':
@@ -705,10 +728,12 @@ async def get_history(
 @router.get("/detail/{session_uuid}")
 async def get_session_detail(
     session_uuid: str,
+    request: Request,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
     """Get detailed session information."""
+    tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
     from sqlalchemy import select, String
     import logging
     
@@ -718,7 +743,7 @@ async def get_session_detail(
     stmt = select(ChatSession).where(
         and_(
             (ChatSession.visitor_uuid == session_uuid) | (ChatSession.session_id == session_uuid),
-            ChatSession.tenant_id == current_user.tenant_id
+            ChatSession.tenant_id == tenant_id
         )
     )
     result = db.execute(stmt)
@@ -736,14 +761,16 @@ async def get_session_detail(
 async def update_lead(
     session_uuid: str,
     data: Dict[str, Any],
+    request: Request,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
     """Manually update lead data for a session from CRM."""
+    tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
     from sqlalchemy import select, or_
     stmt = select(ChatSession).where(
         ((ChatSession.visitor_uuid == session_uuid) | (ChatSession.session_id == session_uuid)),
-        ChatSession.tenant_id == current_user.tenant_id
+        ChatSession.tenant_id == tenant_id
     )
     result = db.execute(stmt)
     session = result.scalars().first()
@@ -790,10 +817,12 @@ async def get_server_time():
 
 @router.post("/cleanup-empty")
 async def cleanup_empty_sessions_endpoint(
+    request: Request,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
     """Cleanup empty sessions endpoint."""
+    tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
     from datetime import datetime, timedelta
     from sqlalchemy import select, and_
     

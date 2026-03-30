@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.dependencies import get_db
 from app.core.config import settings
+from app.core.tenant_resolver import TenantResolver
 from app.core.db_utils import verify_tenant_access
 from app.api.deps import require_role
 from app.models.auth import User, Tenant
@@ -84,16 +85,10 @@ def update_bot_config(
     payload: BotConfigUpdate,
     request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(2)),
-    tenant_id: Optional[int] = None
+    current_user: User = Depends(require_role(2))
 ):
     """Admin-only: Update chatbot name, logo URL, tooltip, or welcome text."""
-    # Use request context if available, otherwise fallback to user's primary
-    target_tenant_id = current_user.tenant_id
-    if current_user.is_super_admin and tenant_id:
-        target_tenant_id = tenant_id
-    elif request.state.tenant_id:
-        target_tenant_id = request.state.tenant_id
+    target_tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
     config = _get_or_create_config(db, target_tenant_id)
 
     update_data = payload.model_dump(exclude_unset=True)
@@ -131,8 +126,7 @@ async def upload_bot_logo(
 
     # Update config with the served URL
     logo_url = f"/static/logos/{filename}"
-    # Use request context if available, otherwise fallback to user's primary
-    target_tenant_id = request.state.tenant_id or current_user.tenant_id
+    target_tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
     config = _get_or_create_config(db, target_tenant_id)
     config.chatbot_logo_url = logo_url
     db.commit()

@@ -157,20 +157,19 @@ async def submit_lead(
             chat_session.lead_score = int(profile_score * 4 + engagement_score * 3 + intent_score * 3) # Normalized to 100
             
             # 3.1 Insert Automated History Message (Persistent Form)
-            import json
-            form_data = {
-                "full_name": lead_req.full_name,
-                "company_name": lead_req.company_name,
-                "business_email": lead_req.business_email,
-                "contact_number": lead_req.contact_number,
-                "website": lead_req.website,
-                "status": "submitted"
-            }
+            formal_msg = (
+                "Thank you! We have successfully received your details:\n\n"
+                f"👤 **Name**: {lead_req.full_name}\n"
+                f"🏢 **Company**: {lead_req.company_name or '-'}\n"
+                f"📧 **Email**: {lead_req.business_email}\n"
+                f"📞 **Phone**: {lead_req.contact_number}\n\n"
+                "Our team will contact you shortly to assist you further."
+            )
             
             system_msg = ChatMessage(
                 session_id=chat_session.session_id,
                 tenant_id=chat_session.tenant_id,  # 🧪 CRITICAL: Link message to session's tenant
-                message_text=json.dumps(form_data),
+                message_text=formal_msg,
                 message_type="form",
                 created_at_utc=datetime.now(timezone.utc),
                 created_at_local=datetime.now(timezone.utc)
