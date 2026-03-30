@@ -28,6 +28,11 @@ class IntentType(Enum):
     API_ACCESS_REQUEST = "API_ACCESS_REQUEST"
     UNKNOWN = "UNKNOWN"
 
+# ⚡ GLOBAL CACHE for IntentConfig (session_id -> data)
+import time
+intent_cache = {} # {tenant_id: {"data": configs, "expiry": timestamp}}
+CACHE_TTL = 300 # 5 minutes
+
 def detect_intent(db: Session, message: str, tenant_id: int) -> str:
     """
     Detects user intent using dynamic configuration from the database.
@@ -50,15 +55,30 @@ def detect_intent(db: Session, message: str, tenant_id: int) -> str:
             logger.info(f"Handoff detected via word: {word}")
             return "HANDOFF"
 
+    # 1.5 GREETING (Safety fallback for basic interactions)
+    greeting_words = ["hi", "hii", "hello", "hey", "hola", "greetings", "good morning", "good evening", "good afternoon"]
+    for word in greeting_words:
+        if re.search(rf"\b{re.escape(word)}\b", message):
+            logger.debug(f"Greeting detected via word: {word}")
+            return "GREETING"
+
     # 2. Dynamic DB-based Detection (PRIMARY)
     from app.models.intent_config import IntentConfig
     
     def fetch_best_match(target_id: int) -> tuple:
         try:
-            configs = db.query(IntentConfig).filter(
-                IntentConfig.tenant_id == target_id,
-                IntentConfig.is_active == True
-            ).all()
+            # ⚡ Check Cache First
+            now = time.time()
+            if target_id in intent_cache and intent_cache[target_id]["expiry"] > now:
+                configs = intent_cache[target_id]["data"]
+            else:
+                configs = db.query(IntentConfig).filter(
+                    IntentConfig.tenant_id == target_id,
+                    IntentConfig.is_active == True
+                ).all()
+                intent_cache[target_id] = {"data": configs, "expiry": now + CACHE_TTL}
+                logger.debug(f"Intent cache refreshed for tenant {target_id}")
+
             match = None
             max_len = 0
             import json
@@ -94,7 +114,7 @@ def detect_intent(db: Session, message: str, tenant_id: int) -> str:
     best_match, longest_kw_len = fetch_best_match(tenant_id)
 
     if best_match:
-        logger.info(f"Best DB match: {best_match} (len={longest_kw_len})")
+        logger.debug(f"Best intent match: {best_match} (len={longest_kw_len})")
         return best_match
 
     return "UNKNOWN"

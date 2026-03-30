@@ -22,8 +22,8 @@ engine = create_engine(
     # ── Pool Settings ────────────────────────────────────────────────────
     pool_pre_ping=True,      # Validate connection health before every use
     pool_recycle=1200,       # Recycle every 20 min (SQL Server drops idle at ~30 min)
-    pool_size=10,            # Keep 10 warm connections in the pool at all times
-    max_overflow=20,         # Allow up to 20 extra burst connections
+    pool_size=20,            # Keep 20 warm connections in the pool at all times
+    max_overflow=50,         # Allow up to 50 extra burst connections
     pool_timeout=30,         # Max queue wait before raising error
     # ── ODBC Connection Resiliency ───────────────────────────────────────
     # Microsoft ODBC Driver 18 built-in retry — handles TCP drops at driver level.
@@ -43,6 +43,19 @@ engine = create_engine(
 @event.listens_for(engine, "connect")
 def on_connect(dbapi_connection, connection_record):
     logger.info("Database: New physical connection established to SQL Server.")
+    
+    # ⚡ FIX: Render Emojis from SQL Server NVARCHAR Correctly
+    try:
+        import pyodbc
+        if isinstance(dbapi_connection, pyodbc.Connection):
+            # Tell pyodbc to handle Unicode / Emojis via raw utf-16le converters
+            dbapi_connection.add_output_converter(pyodbc.SQL_WVARCHAR, lambda x: x.decode('utf-16le') if x is not None else None)
+            dbapi_connection.add_output_converter(pyodbc.SQL_WCHAR, lambda x: x.decode('utf-16le') if x is not None else None)
+            dbapi_connection.add_output_converter(pyodbc.SQL_WLONGVARCHAR, lambda x: x.decode('utf-16le') if x is not None else None)
+    except ImportError:
+        pass # pyodbc not installed/used
+    except Exception as e:
+        logger.warning(f"Could not configure pyodbc encoding: {e}")
 
 @event.listens_for(engine, "checkout")
 def on_checkout(dbapi_connection, connection_record, connection_proxy):

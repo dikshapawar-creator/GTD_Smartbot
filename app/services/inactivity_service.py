@@ -1,61 +1,91 @@
 import asyncio
 import logging
+import random
 from datetime import datetime, timezone
+from typing import Dict
 from app.db.session import SessionLocal
 from app.models.chat_session import ChatSession
 from app.models.chat_message import ChatMessage
 from app.services import session_service
-from app.core.socket_manager import socket_manager
 from app.services.websocket_manager import manager as ws_manager
 
 logger = logging.getLogger(__name__)
 
+# Global tracking to prevent thundering herd / multiple tasks per session
+# session_id -> latest_activity_timestamp
+active_monitors: Dict[str, datetime] = {}
+# session_id -> boolean (is a task already running?)
+running_tasks: set = set()
+
 async def send_inactivity_message(session_id: str, last_activity_timestamp: datetime):
     """
-    Waits 60 seconds and checks if the session is still inactive.
-    If yes, sends an inactivity message and persists it.
-    Uses its own DB session for background safety.
+    Monitors a session for inactivity.
+    Uses a debouncing strategy to ensure only one task runs per session.
     """
-    # Normalize timestamp to naive for comparison (consistent with SQLAlchemy defaults)
-    compare_ts = last_activity_timestamp
-    if compare_ts and compare_ts.tzinfo is not None:
-        compare_ts = compare_ts.astimezone(timezone.utc).replace(tzinfo=None)
+    # Normalize timestamp
+    if last_activity_timestamp and last_activity_timestamp.tzinfo is not None:
+        last_activity_timestamp = last_activity_timestamp.astimezone(timezone.utc).replace(tzinfo=None)
     
-    logger.info(f"Monitor started for session {session_id}. Target Stamp: {compare_ts}")
-    await asyncio.sleep(60)
+    # 1. Update the latest known activity time for this session
+    active_monitors[session_id] = last_activity_timestamp
+    
+    # 2. If a monitor task is already running, this one can exit immediately.
+    # The running task will check active_monitors when it wakes up.
+    if session_id in running_tasks:
+        return
+        
+    running_tasks.add(session_id)
+    logger.debug(f"Monitor: Started single monitor task for session {session_id}")
 
-    db = SessionLocal()
     try:
-        # Re-fetch session to check for latest activity
-        chat_session = db.query(ChatSession).filter(
-            (ChatSession.visitor_uuid == session_id) | (ChatSession.session_id == session_id)
-        ).first()
-        
-        if not chat_session:
-            logger.debug(f"Monitor: Session {session_id} not found.")
-            return
+        while True:
+            current_target = active_monitors.get(session_id)
+            if not current_target:
+                return
 
-        # Case-insensitive check for BOT mode
-        current_mode = (chat_session.conversation_mode or "").upper()
-        if current_mode != "BOT":
-            logger.debug(f"Monitor: Session {session_id} is in mode {current_mode}. Skipping nudge.")
-            return
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            diff = (now - current_target).total_seconds()
+            
+            if diff >= 60:
+                # We have been inactive for at least 60 seconds
+                break
+            
+            # Still active or recently used. Wait the remaining time + jitter
+            wait_time = 60 - diff + random.uniform(0.5, 2.0)
+            logger.debug(f"Monitor: {session_id} active {diff:.1f}s ago. Sleeping {wait_time:.1f}s")
+            await asyncio.sleep(wait_time)
 
-        # 🔧 DEBUG: Log identifiers
-        logger.debug(f"Monitor Sync: visitor_uuid={chat_session.visitor_uuid}, session_id={chat_session.session_id}")
+        # 3. Proceed with Nudge check (Only one task ever reaches here per inactivity period)
+        db = SessionLocal()
+        try:
+            # Re-fetch session to check for latest activity and mode
+            chat_session = db.query(ChatSession).filter(
+                (ChatSession.visitor_uuid == session_id) | (ChatSession.session_id == session_id)
+            ).first()
+            
+            if not chat_session:
+                return
 
-        # Normalize DB timestamp for comparison
-        db_ts = chat_session.last_activity_utc
-        if db_ts and db_ts.tzinfo is not None:
-            db_ts = db_ts.astimezone(timezone.utc).replace(tzinfo=None)
+            # Case-insensitive check for BOT mode
+            current_mode = (chat_session.conversation_mode or "").upper()
+            if current_mode != "BOT":
+                logger.debug(f"Monitor: Session {session_id} mode is {current_mode}. Skipping nudge.")
+                return
 
-        # Check if last_activity_utc is still the same as when we started the monitor
-        diff_seconds = (db_ts - compare_ts).total_seconds() if db_ts and compare_ts else 100
-        logger.debug(f"Monitor Trace: db_ts={db_ts}, compare_ts={compare_ts}, diff={diff_seconds}s")
-        
-        if diff_seconds < 1.0: # Increased tolerance to 1s for safety
-            # Prevent double-nudging
-            last_msg = db.query(ChatMessage).filter(ChatMessage.session_id == chat_session.session_id).order_by(ChatMessage.created_at_utc.desc()).first()
+            # Final verification of timestamp from DB
+            db_ts = chat_session.last_activity_utc
+            if db_ts and db_ts.tzinfo is not None:
+                db_ts = db_ts.astimezone(timezone.utc).replace(tzinfo=None)
+
+            target_ts = active_monitors.get(session_id)
+            if db_ts and target_ts and db_ts > target_ts:
+                # Database has newer activity than what we were tracking.
+                # This task should loop again or exit if another task was started.
+                # But since this is the ONLY running task, we update and loop.
+                active_monitors[session_id] = db_ts
+                return # Next iterate of while True will handle it
+
+            # Generate Nudge
             from app.models.intent_config import IntentConfig
             config = db.query(IntentConfig).filter(
                 IntentConfig.intent_key == "INACTIVITY_NUDGE",
@@ -68,36 +98,29 @@ async def send_inactivity_message(session_id: str, last_activity_timestamp: date
                 "💬- https://wa.me/918527376675\n"
                 "📞 WhatsApp: +91 8527376675\n\n"
                 "We’ll be happy to assist you with complete support.\n\n"
-                "WhatsApp Messenger: More than 2 billion people in over 180 countries use WhatsApp to stay in touch with friends and family, anytime and anywhere."
             )
             
-            # Check if the last message is already the inactivity nudge to prevent sending it multiple times
+            # Prevent double-nudging
+            last_msg = db.query(ChatMessage).filter(ChatMessage.session_id == chat_session.session_id).order_by(ChatMessage.created_at_utc.desc()).first()
             if last_msg and (last_msg.message_text == inactivity_msg):
                 logger.debug(f"Monitor: Nudge already sent for {session_id}.")
                 return
 
-            logger.info(f"Monitor: PERSISTING nudge for {chat_session.session_id}")
+            logger.info(f"Monitor: Sending nudge for {chat_session.session_id}")
             
-            # 1. Persist to DB
+            # Persist and Broadcast
             new_msg = session_service.save_message(db, chat_session, inactivity_msg, "bot")
             db.commit()
-            logger.info(f"Monitor: Nudge SAVED (ID: {new_msg.id})")
             
-            # 2. Broadcast to CRM Dashboard
-            # Use visitor_uuid as the front-end session identifier for CRM
             crm_session_id = str(chat_session.visitor_uuid)
-            await socket_manager.broadcast_event(
-                "NEW_MESSAGE",
-                {
-                    "session_id": crm_session_id,
-                    "message": inactivity_msg,
-                    "sender": "bot",
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                }
-            )
-            logger.info(f"Monitor: Nudge BROADCAST to CRM (Session: {crm_session_id})")
+            from app.core.socket_manager import socket_manager
+            await socket_manager.broadcast_event("NEW_MESSAGE", {
+                "session_id": crm_session_id,
+                "message": inactivity_msg,
+                "sender": "bot",
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }, tenant_id=chat_session.tenant_id)
             
-            # 3. Push to Client via WebSocket
             if ws_manager.has_client(crm_session_id.lower()):
                 await ws_manager.send_to_client(crm_session_id.lower(), {
                     "type": "message",
@@ -105,8 +128,10 @@ async def send_inactivity_message(session_id: str, last_activity_timestamp: date
                     "sender": "bot",
                     "is_inactivity": True
                 })
-                logger.info(f"Monitor: Nudge SENT to Client via WS")
+        finally:
+            db.close()
     except Exception as e:
         logger.error(f"Error in inactivity monitor: {e}")
     finally:
-        db.close()
+        running_tasks.discard(session_id)
+        active_monitors.pop(session_id, None)

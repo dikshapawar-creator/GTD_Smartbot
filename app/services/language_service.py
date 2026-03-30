@@ -19,16 +19,28 @@ def detect_and_translate(text: str) -> tuple[str, str]:
     if not text or not text.strip():
         return "en", text
         
-    # Quick fix for short texts being misclassified by langdetect (e.g. 'hi', 'hello' -> 'sw')
-    # If it's a very short message containing only basic ASCII, it's overwhelmingly likely English
-    # in this context, or at least not worth translating.
-    if len(text.split()) <= 3 and all(ord(c) < 128 for c in text.strip()):
-        return "en", text
+    # ⚡ OPTIMIZATION: skip detection/translation for most common English messages
+    # If text is ASCII and contains common English words or is very short, assume English.
+    text_stripped = text.strip()
+    is_ascii = all(ord(c) < 128 for c in text_stripped)
+    
+    if is_ascii:
+        # Common English greeting/fallback words
+        common_en = {'hi', 'hello', 'hey', 'thanks', 'thank', 'yes', 'no', 'ok', 'okay', 'help', 'bye'}
+        words = text_stripped.lower().split()
+        if len(words) <= 2 and any(w in common_en for w in words):
+            return "en", text
         
+        # If it's a bit longer but still pure ASCII and looks like normal English, skip to save latency
+        if len(text_stripped) < 20: 
+            return "en", text
+            
     try:
+        # Only perform heavy detection if it's not obviously English
         lang_code = detect(text)
         
         if lang_code != "en":
+            logger.info(f"Translating from {lang_code} to en...")
             translated_text = GoogleTranslator(source=lang_code, target='en').translate(text)
             return lang_code, translated_text
             

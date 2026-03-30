@@ -117,7 +117,7 @@ class LiveChatSocketManager:
                 "message": message.message_text,
                 "sender": "agent",
                 "purpose": "chatbot",
-                "agent_name": message.sender_name or "Agent",
+                "agent_name": message.sender_name or "Jessica",
                 "client_msg_id": f"srv-{message.id}"
             })
 

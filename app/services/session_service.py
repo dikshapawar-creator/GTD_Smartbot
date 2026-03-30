@@ -25,6 +25,7 @@ class SessionService:
         browser: str = "Unknown",
         os: str = "Unknown",
         device_type: str = "desktop",
+        commit: bool = True
     ) -> ChatSession:
         """
         Prevents duplicate queue cards by checking for existing active sessions.
@@ -61,8 +62,11 @@ class SessionService:
                 "os": os,
                 "device_type": device_type
             }
-            self.db.commit()
-            self.db.refresh(existing)
+            if commit:
+                self.db.commit()
+                self.db.refresh(existing)
+            else:
+                self.db.flush()
             return existing
         
         # Create new session
@@ -101,14 +105,18 @@ class SessionService:
         }
         
         self.db.add(session)
-        self.db.commit()
-        self.db.refresh(session)
+        if commit:
+            self.db.commit()
+            self.db.refresh(session)
+        else:
+            self.db.flush()
         return session
 
     def update_session_from_lead_form(
         self,
         session_id: str,
-        lead_data: dict
+        lead_data: dict,
+        commit: bool = True
     ) -> ChatSession:
         """
         Updates session with lead form data and proper display name.
@@ -136,8 +144,11 @@ class SessionService:
         session.lead_score = self._calculate_lead_score(lead_data)
         session.lead_status = self._get_lead_status_from_score(session.lead_score)
         
-        self.db.commit()
-        self.db.refresh(session)
+        if commit:
+            self.db.commit()
+            self.db.refresh(session)
+        else:
+            self.db.flush()
         return session
 
     def get_active_sessions(self, tenant_id: int = None) -> List[ChatSession]:
@@ -181,7 +192,7 @@ class SessionService:
                 
         return filtered_sessions
 
-    def agent_takeover(self, session_id: str, agent_name: str) -> ChatSession:
+    def agent_takeover(self, session_id: str, agent_name: str, commit: bool = True) -> ChatSession:
         """Handle agent takeover of bot conversation."""
         session = self.db.query(ChatSession).filter(
             ChatSession.session_id == session_id,
@@ -199,11 +210,14 @@ class SessionService:
         session.last_activity_at = datetime.utcnow()
         session.last_activity_utc = datetime.utcnow()
         
-        self.db.commit()
-        self.db.refresh(session)
+        if commit:
+            self.db.commit()
+            self.db.refresh(session)
+        else:
+            self.db.flush()
         return session
 
-    def end_session(self, session_id: str) -> ChatSession:
+    def end_session(self, session_id: str, commit: bool = True) -> ChatSession:
         """End a chat session."""
         session = self.db.query(ChatSession).filter(
             ChatSession.session_id == session_id,
@@ -221,8 +235,11 @@ class SessionService:
         session.ended_at_utc = datetime.utcnow()
         session.ended_at_local = datetime.utcnow()
         
-        self.db.commit()
-        self.db.refresh(session)
+        if commit:
+            self.db.commit()
+            self.db.refresh(session)
+        else:
+            self.db.flush()
         return session
 
     def _calculate_lead_score(self, lead_data: dict) -> int:
@@ -325,7 +342,8 @@ def create_session(
     device_type: str = "desktop",
     fingerprint: str = None,
     visitor_uuid: str = None,
-    lead_id: int = None
+    lead_id: int = None,
+    commit: bool = True
 ) -> ChatSession:
     """Create a new chat session (synchronous version for backward compatibility)."""
     import uuid
@@ -379,12 +397,15 @@ def create_session(
         }
     
     db.add(session)
-    db.commit()
-    db.refresh(session)
+    if commit:
+        db.commit()
+        db.refresh(session)
+    else:
+        db.flush()
     
     return session
 
-def save_message(db: Session, session: ChatSession, message_text: str, message_type: str) -> ChatMessage:
+def save_message(db: Session, session: ChatSession, message_text: str, message_type: str, commit: bool = True) -> ChatMessage:
     """Save a message to the database (synchronous version for backward compatibility)."""
     now = datetime.utcnow()
     
@@ -405,18 +426,24 @@ def save_message(db: Session, session: ChatSession, message_text: str, message_t
     session.last_activity_at = now
     session.last_activity_utc = now
     
-    db.commit()
-    db.refresh(message)
+    if commit:
+        db.commit()
+        db.refresh(message)
+    else:
+        db.flush()
     
     return message
 
 
-def update_chat_state(db: Session, session: ChatSession, new_state: str) -> None:
+def update_chat_state(db: Session, session: ChatSession, new_state: str, commit: bool = True) -> None:
     """Update the chat state of a session."""
     session.chat_state = str(new_state).upper()
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
 
-def close_session(db: Session, session_id: str, tenant_id: int = None) -> bool:
+def close_session(db: Session, session_id: str, tenant_id: int = None, commit: bool = True) -> bool:
     """Close a session by session_id (synchronous version for backward compatibility)."""
     try:
         # Try to find by visitor_uuid first
@@ -430,7 +457,10 @@ def close_session(db: Session, session_id: str, tenant_id: int = None) -> bool:
             session.last_activity_at = datetime.utcnow()
             session.last_activity_utc = datetime.utcnow()
             
-            db.commit()
+            if commit:
+                db.commit()
+            else:
+                db.flush()
             return True
             
         return False

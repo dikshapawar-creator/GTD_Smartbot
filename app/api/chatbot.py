@@ -296,9 +296,8 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
     # ── 2. INTENT & LEAD LOGIC ──────────────────────────────────────────
     user_message = msg_req.message
     
-    # ✅ PERSISTENCE: Save user message early
-    session_service.save_message(db, active_session, user_message, "user")
-    db.commit()
+    # ✅ PERSISTENCE: Save user message early (No commit yet)
+    session_service.save_message(db, active_session, user_message, "user", commit=False)
 
     # ⏰ INACTIVITY: Monitor for 60s
     background_tasks.add_task(send_inactivity_message, str(active_session.visitor_uuid), active_session.last_activity_utc)
@@ -308,7 +307,7 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
     if check_message_spam(db, active_session, user_message):
         active_session.spam_flag = True
         active_session.session_status = SessionStatus.CLOSED
-        db.commit()
+        db.commit() # Block immediate
         return {
             "sessionId": str(active_session.visitor_uuid),
             "message": "Security policy violation detected. Session closed.",
@@ -322,7 +321,7 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
     lang_code, translated_message = detect_and_translate(user_message)
     if not active_session.language or active_session.language == "en":
         active_session.language = lang_code
-        db.commit()
+        db.flush()
 
     # Analytics: Lead Scoring (Evaluate translated message)
     from app.services.scoring_service import update_session_score
@@ -338,15 +337,17 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
     
     # Check for Human/Representative request first (Priority 1)
     if intent_key == "HANDOFF":
-        bot_msg = (
-            "Thank you. We will arrange a call for you shortly.\n\n"
-            "You can discuss all your questions with our team during the meeting.\n\n"
-            "Regarding your data and requirements, our team will provide you with the appropriate solution."
+        # Dynamic response for handoff
+        from app.services.chatbot import ChatbotService
+        bot_msg = ChatbotService._get_dynamic_response(
+            db,
+            "HANDOFF",
+            "Thank you. We will arrange a call for you shortly.\n\nYou can discuss all your questions with our team during the meeting.\n\nRegarding your data and requirements, our team will provide you with the appropriate solution.",
+            active_session.tenant_id
         )
         active_session.chat_state = ChatState.HANDOFF_SENT.value
-        db.commit()
-        session_service.save_message(db, active_session, bot_msg, "bot")
-        db.commit() # COMMIT BEFORE BROADCAST
+        session_service.save_message(db, active_session, bot_msg, "bot", commit=False)
+        db.commit() # FINAL COMMIT FOR HANDOFF
         
         #  Broadcast handoff signal
         from app.core.socket_manager import socket_manager
@@ -420,9 +421,12 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
     from app.services.chatbot import ChatbotService
     
     try:
-        chatbot_response = ChatbotService.handle_message(db, active_session, translated_message)
+        chatbot_response = ChatbotService.handle_message(db, active_session, translated_message, commit=False)
         bot_msg = chatbot_response.get("message", "")
         
+        # FINAL DATABASE COMMIT after all processing
+        db.commit()
+
         # Determine Response Type (CTA or MESSAGE)
         res_type = ResponseType.CTA if chatbot_response.get("type") == "CTA" else ResponseType.MESSAGE
         
@@ -438,9 +442,15 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
             "server_time_utc": datetime.now(timezone.utc)
         })
     except Exception as e:
-        logger.error(f"ChatbotService error: {e}")
-        bot_msg = "I'm here to help! Are you interested in Import or Export services?"
-        session_service.save_message(db, active_session, bot_msg, "bot")
+        logger.error(f"ChatbotService error: {e}", exc_info=True)
+        from app.services.chatbot import ChatbotService
+        bot_msg = ChatbotService._get_dynamic_response(
+            db, 
+            "WELCOME_QUESTION", 
+            "I'm here to help! Are you interested in Import or Export services?",
+            active_session.tenant_id
+        )
+        session_service.save_message(db, active_session, bot_msg, "bot", commit=False)
         db.commit()
         
         # Return CTA even for fallback messages
@@ -449,8 +459,7 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
             "message": bot_msg,
             "state": str(active_session.chat_state or "START").replace("ChatState.", "").replace("CHATSTATE.", "").upper() if active_session.chat_state != "GREETING" else "START",
             "type": ResponseType.CTA,
-            "cta_label": "Book Demo",
-            "action": "OPEN_LEAD_FORM",
+            "ctas": [{"label": "Book Demo", "action": "OPEN_LEAD_FORM", "icon": "🚀", "type": "primary"}],
             "conversation_status": active_session.conversation_mode,
             "server_time_utc": datetime.now(timezone.utc)
         })

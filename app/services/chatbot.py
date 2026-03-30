@@ -84,7 +84,7 @@ class ChatbotService:
         return any(word in msg_lower for word in urgent_keywords)
 
     @staticmethod
-    def handle_message(db: Session, chat_session: ChatSession, user_message: str) -> Dict[str, Any]:
+    def handle_message(db: Session, chat_session: ChatSession, user_message: str, commit: bool = True) -> Dict[str, Any]:
         """
         Handles a message with Simplified Bot Flow:
         1. Check Urgent (WhatsApp redirect)
@@ -94,7 +94,7 @@ class ChatbotService:
         session_id = chat_session.session_id
 
         # A. Save user message (priority)
-        session_service.save_message(db, chat_session, user_message, "user")
+        session_service.save_message(db, chat_session, user_message, "user", commit=commit)
 
         # B. Urgent Keyword Handling (TOP PRIORITY)
         if ChatbotService.check_urgent(user_message):
@@ -104,8 +104,8 @@ class ChatbotService:
                 "We understand your request is urgent. For immediate assistance, please contact us on WhatsApp: +91 8527376675",
                 chat_session.tenant_id
             )
-            session_service.save_message(db, chat_session, urgent_msg, "bot")
-            session_service.update_chat_state(db, chat_session, ChatState.COMPLETE)
+            session_service.save_message(db, chat_session, urgent_msg, "bot", commit=commit)
+            session_service.update_chat_state(db, chat_session, ChatState.COMPLETE, commit=commit)
             return {
                 "message": urgent_msg,
                 "state": ChatState.COMPLETE.value,
@@ -153,11 +153,11 @@ class ChatbotService:
             except ValueError:
                 new_state = ChatState.START.value
                 
-            session_service.update_chat_state(db, chat_session, new_state)
+            session_service.update_chat_state(db, chat_session, new_state, commit=commit)
             
             # CLEANSE: Remove PII requests
             intent_response = ChatbotService._clean_bot_response(intent_response)
-            session_service.save_message(db, chat_session, intent_response, "bot")
+            session_service.save_message(db, chat_session, intent_response, "bot", commit=commit)
             
             # Use Multi-CTA for every intent response for consistency
             return {
@@ -178,8 +178,13 @@ class ChatbotService:
         
         if last_state == ChatState.FALLBACK:
             # Repeated fallback -> Short silence message
-            repeat_msg = "Our team will connect with you shortly."
-            session_service.save_message(db, chat_session, repeat_msg, "bot")
+            repeat_msg = ChatbotService._get_dynamic_response(
+                db, 
+                "FALLBACK_REPEAT", 
+                "Our team will connect with you shortly.",
+                chat_session.tenant_id
+            )
+            session_service.save_message(db, chat_session, repeat_msg, "bot", commit=commit)
             return {
                 "message": repeat_msg,
                 "state": ChatState.FALLBACK.value,
@@ -194,8 +199,8 @@ class ChatbotService:
             chat_session.tenant_id
         )
         
-        session_service.update_chat_state(db, chat_session, ChatState.FALLBACK.value)
-        session_service.save_message(db, chat_session, fallback_msg, "bot")
+        session_service.update_chat_state(db, chat_session, ChatState.FALLBACK.value, commit=commit)
+        session_service.save_message(db, chat_session, fallback_msg, "bot", commit=commit)
         
         return {
             "message": fallback_msg,
