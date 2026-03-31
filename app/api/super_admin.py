@@ -50,6 +50,27 @@ def create_tenant(
     db.commit()
     db.refresh(tenant)
 
+    # 🔄 Auto-assign ALL Super Admins to the new tenant
+    # This ensures it shows up in their workspace switcher immediately.
+    super_admins = db.query(User).filter(User.is_super_admin == True).all()
+    for admin in super_admins:
+        # Check if already assigned (unlikely but safe)
+        existing_assignment = db.query(UserTenant).filter(
+            UserTenant.user_id == admin.id,
+            UserTenant.tenant_id == tenant.id
+        ).first()
+        
+        if not existing_assignment:
+            assignment = UserTenant(
+                user_id=admin.id,
+                tenant_id=tenant.id,
+                status=True,
+                is_primary=False
+            )
+            db.add(assignment)
+    
+    db.commit()
+
     AuditService.log_action(
         db, f"TENANT_CREATED({tenant.name})",
         tenant.id, actor_user_id=current_user.id

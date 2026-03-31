@@ -118,9 +118,25 @@ def get_me(current_user: User = Depends(get_current_user), db: Session = Depends
     """Get current authenticated user's profile."""
     if current_user.is_super_admin:
         # Dynamically inject all active tenants for super admins
-        from app.models.auth import Tenant
+        from app.models.auth import Tenant, UserTenant
         all_tenants = db.query(Tenant).filter(Tenant.is_active == True).all()
         
+        # 🔄 BACKFILL: Ensure this Super Admin has a UserTenant record for EVERY active tenant
+        for t in all_tenants:
+            existing = db.query(UserTenant).filter(
+                UserTenant.user_id == current_user.id,
+                UserTenant.tenant_id == t.id
+            ).first()
+            if not existing:
+                new_map = UserTenant(
+                    user_id=current_user.id,
+                    tenant_id=t.id,
+                    status=True,
+                    is_primary=(t.id == current_user.tenant_id)
+                )
+                db.add(new_map)
+        db.commit()
+
         # We construct a dictionary matching UserResponse because we shouldn't mutate the db object's relationship
         user_dict = {
             "id": current_user.id,

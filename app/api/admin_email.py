@@ -62,8 +62,9 @@ def update_tenant_email_config(
         config = EmailConfig(tenant_id=tenant_id)
         db.add(config)
     
-    # Update fields
-    for field, value in config_in.dict(exclude_unset=True).items():
+    # Update fields from Pydantic model
+    update_data = config_in.dict()
+    for field, value in update_data.items():
         setattr(config, field, value)
     
     try:

@@ -167,6 +167,7 @@ async def websocket_chat(
     session_id: str,
     role: str = Query(...),
     token: str = Query(...),
+    tenant_id: Optional[int] = Query(None),
 ):
     """
     Bidirectional WebSocket for live chat.
@@ -184,7 +185,6 @@ async def websocket_chat(
                 await websocket.close(code=4001, reason="Invalid client token")
                 return
             
-            # Fetch session to get tenant_id for later message persists
             # Fetch session to get tenant_id for later message persists
             chat_session = (
                 db.query(ChatSession)
@@ -225,10 +225,25 @@ async def websocket_chat(
                 await websocket.close(code=4003, reason="Account restricted or session expired")
                 return
 
+            # 🏢 Determine Tenant Context
             user_tenant_id = agent.tenant_id
+            if tenant_id:
+                if agent.is_super_admin:
+                    user_tenant_id = tenant_id
+                else:
+                    from app.models.auth import UserTenant
+                    has_access = db.query(UserTenant).filter(
+                        UserTenant.user_id == agent.id,
+                        UserTenant.tenant_id == tenant_id,
+                        UserTenant.status == True
+                    ).first()
+                    if has_access:
+                        user_tenant_id = tenant_id
+                    else:
+                        await websocket.close(code=4003, reason="Access denied for this workspace")
+                        return
 
             # Verify session belongs to agent's tenant (allow CLOSED sessions to be reactivated)
-            # Fetch session to get tenant_id for later message persists
             chat_session = (
                 db.query(ChatSession)
                 .filter(
@@ -434,9 +449,9 @@ async def websocket_chat(
                         logger.warning(f"[WS_AGENT] No client connected for session {normalized_sid}. Available clients: {list(manager._clients.keys())}")
 
             except (RuntimeError, ValueError) as e:
-                # Catch potential socket protocol errors without breaking the loop
-                logger.error(f"⚠️ [WS] Non-fatal loop error for {session_id}: {e}")
-                continue
+                # Catch closed socket state errors to break the loop safely
+                logger.error(f"⚠️ [WS] Fatal socket state error for {session_id}: {e}")
+                break
 
     except WebSocketDisconnect:
         logger.info(f"🔴 [WS] Client disconnected: {session_id} ({role})")

@@ -363,3 +363,4 @@ def _ensure_tenant_id_columns(engine):
 
         # DO NOT re-raise in development/startup so the app can boot
         # and provide health status or allow manual diagnostics via API.
+        

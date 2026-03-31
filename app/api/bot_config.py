@@ -108,15 +108,17 @@ async def upload_bot_logo(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(2))
 ):
-    """Admin-only: Upload a logo image. Saves to static/logos/ and updates config."""
+    """Admin-only: Upload a logo image for the current tenant context."""
     # Validate file type
     allowed_types = {"image/png", "image/jpeg", "image/svg+xml", "image/webp", "image/gif"}
     if file.content_type not in allowed_types:
-        raise HTTPException(status_code=400, detail=f"File type '{file.content_type}' not allowed. Use PNG, JPG, SVG, WebP, or GIF.")
+        raise HTTPException(status_code=400, detail=f"File type '{file.content_type}' not allowed.")
 
+    target_tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
+    
     # Generate unique filename
     ext = os.path.splitext(file.filename or "logo.png")[1] or ".png"
-    filename = f"chatbot_logo_{current_user.tenant_id}_{uuid.uuid4().hex[:8]}{ext}"
+    filename = f"chatbot_logo_{target_tenant_id}_{uuid.uuid4().hex[:8]}{ext}"
     filepath = os.path.join(LOGO_DIR, filename)
 
     # Save file
@@ -124,13 +126,69 @@ async def upload_bot_logo(
     with open(filepath, "wb") as f:
         f.write(contents)
 
-    # Update config with the served URL
     logo_url = f"/static/logos/{filename}"
-    target_tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
     config = _get_or_create_config(db, target_tenant_id)
     config.chatbot_logo_url = logo_url
     db.commit()
     db.refresh(config)
 
-    logger.info(f"Logo uploaded by user {current_user.id}: {logo_url}")
     return {"logo_url": logo_url, "message": "Logo uploaded successfully"}
+
+
+# ── Super Admin Specific Endpoints ────────────────────────────────────
+
+@router.get("/admin/bot-config/{tenant_id}", response_model=BotConfigResponse)
+def admin_get_bot_config(
+    tenant_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(4)) # Super Admin only
+):
+    """Super Admin: Get branding for ANY tenant."""
+    config = _get_or_create_config(db, tenant_id)
+    return BotConfigResponse.model_validate(config)
+
+
+@router.put("/admin/bot-config/{tenant_id}", response_model=BotConfigResponse)
+def admin_update_bot_config(
+    tenant_id: int,
+    payload: BotConfigUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(4))
+):
+    """Super Admin: Update branding for ANY tenant."""
+    config = _get_or_create_config(db, tenant_id)
+
+    update_data = payload.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(config, field, value)
+
+    db.commit()
+    db.refresh(config)
+    return BotConfigResponse.model_validate(config)
+
+
+@router.post("/admin/bot-config/{tenant_id}/upload-logo")
+async def admin_upload_bot_logo(
+    tenant_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(4))
+):
+    """Super Admin: Upload logo for ANY tenant."""
+    allowed_types = {"image/png", "image/jpeg", "image/svg+xml", "image/webp", "image/gif"}
+    if file.content_type not in allowed_types:
+        raise HTTPException(status_code=400, detail="File type not allowed.")
+
+    ext = os.path.splitext(file.filename or "logo.png")[1] or ".png"
+    filename = f"chatbot_logo_{tenant_id}_{uuid.uuid4().hex[:8]}{ext}"
+    filepath = os.path.join(LOGO_DIR, filename)
+
+    contents = await file.read()
+    with open(filepath, "wb") as f:
+        f.write(contents)
+
+    logo_url = f"/static/logos/{filename}"
+    config = _get_or_create_config(db, tenant_id)
+    config.chatbot_logo_url = logo_url
+    db.commit()
+    return {"logo_url": logo_url}
