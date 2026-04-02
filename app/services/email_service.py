@@ -32,7 +32,7 @@ RESET_PASSWORD_EMAIL_TEMPLATE = """
                   Password Reset Request
               </h2>
               <p style="margin:5px 0 0; color:#888; font-size:14px;">
-                GTD Service Secure Access
+                Smart Chatbot Secure Access
               </p>
             </td>
           </tr>
@@ -75,7 +75,7 @@ RESET_PASSWORD_EMAIL_TEMPLATE = """
           <tr>
             <td style="text-align:center; font-size:12px; color:#999; padding-top:10px;">
               If you have any questions, just reply to this email.<br><br>
-              © 2026 GTD Service. All rights reserved.
+              © 2026 Smart Chatbot. All rights reserved.
             </td>
           </tr>
 
@@ -114,7 +114,7 @@ CONFIRMATION_EMAIL_TEMPLATE = """
                   Demo Confirmed
               </h2>
               <p style="margin:5px 0 0; color:#888; font-size:14px;">
-                GTD Service
+                Smart Chatbot
               </p>
             </td>
           </tr>
@@ -169,7 +169,7 @@ CONFIRMATION_EMAIL_TEMPLATE = """
           <tr>
             <td style="text-align:center; font-size:12px; color:#999; padding-top:10px;">
               If you have any questions, just reply to this email.<br><br>
-              © 2026 GTD Service. All rights reserved.
+              © 2026 Smart Chatbot. All rights reserved.
             </td>
           </tr>
 

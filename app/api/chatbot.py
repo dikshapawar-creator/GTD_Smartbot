@@ -38,7 +38,7 @@ async def initialize_session(request: Request, response: Response, background_ta
         if active_session and active_session.session_status == SessionStatus.ACTIVE:
             return {
                 "session_token": str(active_session.visitor_uuid),
-                "message": "Welcome back to GTD Service! How can I assist with your trade intelligence today?",
+                "message": "Welcome back to Smart Chatbot! How can I assist with your trade operations and intelligence needs today?",
                 "state": str(active_session.chat_state or "START").replace("ChatState.", "").replace("CHATSTATE.", "").upper() if active_session.chat_state != "GREETING" else "START",
                 "type": ResponseType.CTA,
                 "ctas": [
@@ -177,7 +177,7 @@ async def initialize_session(request: Request, response: Response, background_ta
 
     # Fetch professional greeting from DB for consistency
     if is_returning:
-        greeting_res = {"message": "Welcome back 👋 How can I help today?"}
+        greeting_res = {"message": "Welcome back 👋 How can I help with your trade operations today?"}
     else:
         greeting_res = greeting_handler.handle_greeting(db, new_session)
 

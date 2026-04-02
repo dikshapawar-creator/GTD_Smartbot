@@ -130,6 +130,8 @@ async def submit_lead(
             chat_session.lead_email = lead_req.business_email
             chat_session.lead_phone = lead_req.contact_number
             chat_session.lead_company = lead_req.company_name
+            # Ensure compatibility with any components looking for 'Full Name' or 'Visitor Name'
+            # (Adding metadata or attributes if model supports it, but lead_name is the standard here)
             chat_session.is_lead = True
             chat_session.last_activity_at = datetime.now(timezone.utc)
             chat_session.last_activity_utc = datetime.now(timezone.utc)
@@ -159,7 +161,8 @@ async def submit_lead(
             
             # 3.1 Insert Automated History Message (Persistent Form)
             formal_msg = (
-                "Thank you! We have successfully received your details:\n\n"
+                "🚨 **Enquiry Submission**\n\n"
+                "Thank you! We have received your details:\n"
                 f"👤 **Name**: {lead_req.full_name}\n"
                 f"🏢 **Company**: {lead_req.company_name or '-'}\n"
                 f"📧 **Email**: {lead_req.business_email}\n"
@@ -220,10 +223,12 @@ async def submit_lead(
                 {
                     "session_id": chat_session.session_id,
                     "message": system_msg.message_text,
+                    "sender": "bot", # CRM expects bot/agent/user
                     "role": "system",
                     "created_at": system_msg.created_at_utc.isoformat(),
                     "created_at_ist": system_msg.created_at_ist
-                }
+                },
+                tenant_id=current_tenant_id
             )
             # 🔥 Audit Logging
             from app.services.audit_service import AuditService

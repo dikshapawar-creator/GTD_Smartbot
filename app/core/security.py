@@ -92,7 +92,7 @@ def secure_compare(val1: str, val2: str) -> bool:
     return hmac.compare_digest(val1, val2)
 
 def generate_tenant_key(length: int = 10) -> str:
-    """Generate a short, URL-safe tenant identifier (e.g. 'gtd_7a2b9c')."""
+    """Generate a short, URL-safe tenant identifier (e.g. 'scb_7a2b9c')."""
     # Using lowercase and digits for maximum URL compatibility and readability
     characters = string.ascii_lowercase + string.digits
     return "".join(secrets.choice(characters) for _ in range(length))

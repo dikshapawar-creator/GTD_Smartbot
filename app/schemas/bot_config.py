@@ -5,11 +5,11 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 class BotConfigResponse(BaseModel):
-    chatbot_name: Optional[str] = Field(default="GTD Support")
+    chatbot_name: Optional[str] = Field(default="Smart Chatbot")
     chatbot_logo_url: Optional[str] = Field(default="/static/logo.png")
     fab_tooltip: Optional[str] = Field(default="Trade Support")
-    welcome_text: Optional[str] = Field(default="Welcome to GTD Service.")
-    primary_color: Optional[str] = Field(default="#2563eb")
+    welcome_text: Optional[str] = Field(default="Welcome to Smart Chatbot.")
+    primary_color: Optional[str] = Field(default="#2B2A9B")
     secondary_color: Optional[str] = Field(default="#1e40af")
     font_family: Optional[str] = Field(default="'Inter', sans-serif")
 

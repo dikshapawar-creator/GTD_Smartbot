@@ -31,7 +31,7 @@ class IntentType(Enum):
 # ⚡ GLOBAL CACHE for IntentConfig (session_id -> data)
 import time
 intent_cache = {} # {tenant_id: {"data": configs, "expiry": timestamp}}
-CACHE_TTL = 300 # 5 minutes
+CACHE_TTL = 60 # 1 minute (reduced from 5m for better responsiveness)
 
 def detect_intent(db: Session, message: str, tenant_id: int) -> str:
     """
@@ -51,14 +51,14 @@ def detect_intent(db: Session, message: str, tenant_id: int) -> str:
     # Use word boundary to avoid partial matches
     import re
     for word in handoff_words:
-        if re.search(rf"\b{re.escape(word)}\b", message):
+        if re.search(rf"\b{re.escape(word)}\b", message, re.IGNORECASE):
             logger.info(f"Handoff detected via word: {word}")
             return "HANDOFF"
 
     # 1.5 GREETING (Safety fallback for basic interactions)
     greeting_words = ["hi", "hii", "hello", "hey", "hola", "greetings", "good morning", "good evening", "good afternoon"]
     for word in greeting_words:
-        if re.search(rf"\b{re.escape(word)}\b", message):
+        if re.search(rf"\b{re.escape(word)}\b", message, re.IGNORECASE):
             logger.debug(f"Greeting detected via word: {word}")
             return "GREETING"
 
@@ -102,9 +102,15 @@ def detect_intent(db: Session, message: str, tenant_id: int) -> str:
 
                 for kw in keywords:
                     kw = kw.lower().strip()
-                    if kw and kw in message and len(kw) > max_len:
+                    if not kw: continue
+                    
+                    # ⚡ Use word boundary matching for more accurate detection
+                    # This prevents "buy" matching "building"
+                    pattern = rf"\b{re.escape(kw)}\b"
+                    if re.search(pattern, message, re.IGNORECASE) and len(kw) > max_len:
                         max_len = len(kw)
                         match = config.intent_key
+                        logger.debug(f"Matched keyword '{kw}' for intent '{match}'")
             return match, max_len
         except Exception as e:
             logger.error(f"Error querying IntentConfig for tenant {target_id}: {e}")

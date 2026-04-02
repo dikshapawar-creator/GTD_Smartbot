@@ -2,7 +2,7 @@
 IntentConfig model — Stores dynamic intent keywords and response templates.
 Allows admins to update bot behavior without redeploying code.
 """
-from sqlalchemy import Column, String, BigInteger, JSON, ForeignKey, Integer, UniqueConstraint, Boolean
+from sqlalchemy import Column, String, BigInteger, JSON, ForeignKey, Integer, UniqueConstraint, Boolean, Unicode
 from app.db.session import Base
 
 class IntentConfig(Base):
@@ -18,7 +18,7 @@ class IntentConfig(Base):
     keywords = Column(JSON, nullable=False)
     
     # Static response or template
-    response_text = Column(String(1000), nullable=True)
+    response_text = Column(Unicode(5000), nullable=True)
     
     # Optional metadata (e.g., CTA label, action)
     metadata_json = Column(JSON, nullable=True)

@@ -14,7 +14,7 @@ def handle_greeting(db: Session, chat_session: ChatSession) -> dict:
     Handles a greeting message using the template stored in intent_configs.
     """
     # Fetch response from DB
-    # Force professional greeting (pinned to GTD Service / Tenant 1 flow)
+    # Force professional greeting (pinned to Smart Chatbot / Tenant 1 flow)
     config = db.query(IntentConfig).filter(
         IntentConfig.intent_key == "GREETING",
         IntentConfig.tenant_id == chat_session.tenant_id

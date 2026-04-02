@@ -3,7 +3,7 @@ ChatMessage model — stores every individual chat message under a session.
 Optimized with indexing for fast retrieval and history pagination.
 """
 from sqlalchemy import (
-    Column, BigInteger, String, Text, DateTime, ForeignKey, Index, Integer
+    Column, BigInteger, String, Text, DateTime, ForeignKey, Index, Integer, UnicodeText
 )
 from app.db.session import Base
 
@@ -20,7 +20,7 @@ class ChatMessage(Base):
     # 'user', 'bot', 'agent', or 'system'
     message_type = Column(String(10), nullable=False)
 
-    message_text = Column(Text, nullable=False)
+    message_text = Column(UnicodeText, nullable=False)
 
     # Sender Attribution (for Agent Tracking)
     sender_user_id = Column(Integer, nullable=True) # ID of the agent (from users table)

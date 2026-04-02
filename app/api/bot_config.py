@@ -38,10 +38,10 @@ def _get_or_create_config(db: Session, tenant_id: int) -> BotConfig:
         # Create default
         config = BotConfig(
             tenant_id=tenant_id,
-            chatbot_name="GTD Support",
+            chatbot_name="Smart Chatbot",
             chatbot_logo_url="/static/logos/chatbot_logo_2_67e79328.png",
             fab_tooltip="Trade Support",
-            welcome_text="Welcome to GTD Service.",
+            welcome_text="Welcome to Trade Service.",
             primary_color="#2563eb",
             secondary_color="#1e40af",
             font_family="'Inter', sans-serif"

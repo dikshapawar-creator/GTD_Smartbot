@@ -173,10 +173,10 @@ def init_db():
                 if not existing:
                     _session.add(BotConfig(
                         tenant_id=tid,
-                        chatbot_name="GTD Support",
+                        chatbot_name="Smart Chatbot",
                         chatbot_logo_url="/static/logo.png",
                         fab_tooltip="Trade Support",
-                        welcome_text="Welcome to GTD Service."
+                        welcome_text="Welcome to Smart Chatbot."
                     ))
                     _session.commit()
                     logger.info(f"Database: Seeded BotConfig for tenant {tid}.")
@@ -331,7 +331,7 @@ def _ensure_tenant_id_columns(engine):
             if tenants_without_key:
                 from app.core.security import generate_tenant_key
                 for tid, tname in tenants_without_key:
-                    # Generate a key (e.g., 'gtd_7a2b9c' or just '7a2b9c')
+                    # Generate a key (e.g., 'scb_7a2b9c' or just '7a2b9c')
                     new_key = generate_tenant_key(length=8)
                     logger.info(f"Database: Retroactively assigning key {new_key} to tenant {tid}")
                     conn.execute(text("UPDATE tenants SET tenant_key = :key WHERE id = :id"), {"key": new_key, "id": tid})
@@ -343,16 +343,14 @@ def _ensure_tenant_id_columns(engine):
             logger.info("Database: cleaning up bot_config branding and syncing logos...")
             # We use the specific high-fidelity logo uploaded today for tenant 2 as the new standard
             logo_path = "/static/logos/chatbot_logo_2_67e79328.png"
-            conn.execute(text(f"""
+            # Only update records that still have the legacy 'GTD' defaults
+            conn.execute(text("""
                 UPDATE bot_config 
-                SET chatbot_name = 'GTD Support',
-                    chatbot_logo_url = '{logo_path}',
+                SET chatbot_name = 'Smart Chatbot',
                     fab_tooltip = 'Trade Support',
-                    welcome_text = 'Welcome to GTD Service.',
-                    primary_color = '#2563eb',
-                    secondary_color = '#1e40af',
-                    font_family = 'Inter, sans-serif'
-                WHERE tenant_id IS NOT NULL
+                    welcome_text = 'Welcome to Smart Chatbot.'
+                WHERE chatbot_name = 'GTD Support' 
+                   OR welcome_text = 'Welcome to GTD Service.'
             """))
 
             # 7. Session ID/UUID mismatch is handled at runtime in live_chat.py and ws_chat.py

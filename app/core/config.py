@@ -5,7 +5,7 @@ import json
 
 
 class Settings(BaseSettings):
-    APP_NAME: str = "GTD Service Intelligence"
+    APP_NAME: str = "Smart Chatbot Intelligence"
     DATABASE_URL: str
     SECRET_KEY: str = "your-secret-key-here"
     DEBUG: bool = True
@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     SMTP_USER: str = ""
     SMTP_PASSWORD: str = ""
     SMTP_FROM_EMAIL: str = ""
-    SMTP_FROM_NAME: str = "GTD Service"
+    SMTP_FROM_NAME: str = "Smart Chatbot"
     SMTP_USE_TLS: bool = True
     SMTP_USE_SSL: bool = False
 
