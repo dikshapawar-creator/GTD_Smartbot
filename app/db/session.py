@@ -321,6 +321,18 @@ def _ensure_tenant_id_columns(engine):
                     logger.info(f"Database: Adding {col} to chat_sessions...")
                     conn.execute(text(f"ALTER TABLE chat_sessions ADD {col} {col_type} NULL"))
 
+            # 6.6 Chat message read receipts
+            for col, col_type in [
+                ("is_read", "BIT NOT NULL DEFAULT 0"),
+                ("read_at", "DATETIME NULL")
+            ]:
+                check_col = conn.execute(text(
+                    f"SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'chat_messages' AND COLUMN_NAME = '{col}'"
+                )).fetchone()
+                if not check_col:
+                    logger.info(f"Database: Adding {col} to chat_messages...")
+                    conn.execute(text(f"ALTER TABLE chat_messages ADD {col} {col_type}"))
+
             # 7. Seed Default Tenant API Key if missing
             default_tenant = conn.execute(text(f"SELECT id FROM tenants WHERE id = {settings.DEFAULT_TENANT_ID}")).fetchone()
             if default_tenant:

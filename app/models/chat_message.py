@@ -3,7 +3,7 @@ ChatMessage model — stores every individual chat message under a session.
 Optimized with indexing for fast retrieval and history pagination.
 """
 from sqlalchemy import (
-    Column, BigInteger, String, Text, DateTime, ForeignKey, Index, Integer, UnicodeText
+    Column, BigInteger, String, Text, DateTime, ForeignKey, Index, Integer, UnicodeText, Boolean
 )
 from app.db.session import Base
 
@@ -31,6 +31,10 @@ class ChatMessage(Base):
     created_at = Column(DateTime, nullable=False, index=True)
     created_at_utc = Column(DateTime, nullable=False, index=True)
     created_at_local = Column(DateTime, nullable=False)
+
+    # Read receipt tracking
+    is_read = Column(Boolean, default=False, nullable=False, server_default='0')
+    read_at = Column(DateTime, nullable=True)
 
     __table_args__ = (
         # ── Primary pagination pattern: all messages for a session, ordered by time

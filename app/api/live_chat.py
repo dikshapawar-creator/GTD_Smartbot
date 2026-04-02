@@ -169,9 +169,70 @@ async def get_messages(
             "sender_email": msg.sender_email,
             "created_at_utc": msg.created_at.isoformat() if msg.created_at else None,
             "created_at_ist": format_ist_datetime(msg.created_at),
+            "is_read": bool(getattr(msg, 'is_read', False)),
+            "read_at": msg.read_at.isoformat() if getattr(msg, 'read_at', None) else None,
         })
     
     return {"items": items}
+
+
+@router.post("/read/{session_uuid}")
+async def mark_messages_read(
+    session_uuid: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Agent marks all user messages in a session as read, triggering double-tick on client."""
+    tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
+    now = datetime.utcnow()
+
+    # Find the session
+    stmt = (
+        select(ChatSession)
+        .where(
+            and_(
+                ChatSession.visitor_uuid == session_uuid,
+                ChatSession.tenant_id == tenant_id
+            )
+        )
+        .order_by(ChatSession.last_activity_at.desc())
+        .limit(1)
+    )
+    result = db.execute(stmt)
+    chat_session = result.scalars().first()
+
+    if not chat_session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Bulk mark all unread USER messages as read
+    try:
+        db.query(ChatMessage).filter(
+            ChatMessage.session_id == chat_session.session_id,
+            ChatMessage.message_type == 'user',
+            ChatMessage.is_read == False
+        ).update({"is_read": True, "read_at": now}, synchronize_session=False)
+        db.commit()
+    except Exception:
+        # Column may not exist yet in older DBs - ignore gracefully
+        db.rollback()
+
+    # Broadcast MESSAGE_READ event to client WebSocket
+    try:
+        from app.core.socket_manager import socket_manager
+        await socket_manager.broadcast_event(
+            "MESSAGE_READ",
+            {
+                "session_id": session_uuid,
+                "read_by": "agent",
+                "read_at": now.isoformat()
+            },
+            tenant_id=tenant_id
+        )
+    except Exception as e:
+        logger.warning(f"MESSAGE_READ broadcast failed: {e}")
+
+    return {"status": "ok", "read_at": now.isoformat()}
 
 
 @router.post("/intervene/{session_uuid}")
@@ -220,16 +281,56 @@ async def intervene_session(
     db.commit()
     db.refresh(session)
     
+    # Get recent message history for agent context
+    from app.models.chat_message import ChatMessage
+    recent_messages = (
+        db.query(ChatMessage)
+        .filter(ChatMessage.session_id == session.session_id)
+        .order_by(ChatMessage.created_at_utc.desc())
+        .limit(20)
+        .all()
+    )
+    
+    # Format messages for agent
+    message_history = []
+    for msg in reversed(recent_messages):  # Reverse to get chronological order
+        message_history.append({
+            "id": msg.id,
+            "message_type": msg.message_type,
+            "message_text": msg.message_text,
+            "created_at_ist": msg.created_at_ist,
+            "sender_name": msg.sender_name,
+            "is_read": msg.is_read
+        })
+    
     # Notify via WebSocket using existing infrastructure
     try:
         socket_manager = get_live_chat_socket()
         if socket_manager:
             await socket_manager.notify_session_updated(session, session.tenant_id)
+            
+        # Also broadcast agent takeover with message history
+        from app.core.socket_manager import socket_manager as ws_manager
+        await ws_manager.broadcast_event(
+            "AGENT_TAKEOVER",
+            {
+                "session_uuid": session_uuid,
+                "session_id": session.session_id,
+                "agent_name": current_user.full_name,
+                "message_history": message_history,
+                "timestamp": datetime.utcnow().isoformat()
+            },
+            tenant_id=tenant_id
+        )
     except Exception as e:
         print(f"WebSocket notification failed: {e}")
         # Continue without WebSocket - REST API still works
     
-    return {"message": "Agent takeover successful"}
+    return {
+        "message": "Agent takeover successful",
+        "session_id": session.session_id,
+        "message_history": message_history
+    }
 
 
 @router.post("/message/{session_uuid}")
@@ -291,7 +392,8 @@ async def send_message(
     try:
         socket_manager = get_live_chat_socket()
         if socket_manager:
-            await socket_manager.notify_message(message, session, session.tenant_id)
+            client_msg_id = message_data.get("client_msg_id")
+            await socket_manager.notify_message(message, session, session.tenant_id, client_msg_id=client_msg_id)
     except Exception as e:
         print(f"WebSocket notification failed: {e}")
         # Continue without WebSocket - REST API still works
@@ -535,7 +637,7 @@ def format_session_for_crm(session: ChatSession) -> dict:
         "agent_closed_at": session.agent_closed_at.isoformat() if session.agent_closed_at else None,
         "is_locked": session.is_locked,
         "is_online": manager.has_client(session.visitor_uuid),
-        "lead_name": getattr(session.lead, 'name', None) or session.lead_name or f"Visitor #{session.visitor_uuid[-6:].upper()}",
+        "lead_name": getattr(session.lead, 'name', None) or session.lead_name,
         "lead_company": getattr(session.lead, 'company', None) or session.lead_company,
         "lead_email": getattr(session.lead, 'email', None) or session.lead_email,
         "lead_phone": getattr(session.lead, 'phone', None) or session.lead_phone,

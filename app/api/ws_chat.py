@@ -40,7 +40,15 @@ async def websocket_crm_updates(
     Global WebSocket for CRM dashboard updates (Intents, Leads, Users).
     SECURITY: Enforces tenant isolation via JWT.
     """
-    await websocket.accept()
+    logger.info(f"🔌 WebSocket CRM connection attempt from {websocket.client}")
+    
+    try:
+        await websocket.accept()
+        logger.info("✅ WebSocket accepted")
+    except Exception as e:
+        logger.error(f"❌ Failed to accept WebSocket: {e}")
+        return
+    
     db = _get_db_session()
     
     try:
@@ -53,13 +61,16 @@ async def websocket_crm_updates(
             token_version = payload.get("token_version")
             if not agent_id or token_version is None:
                 raise JWTError()
-        except (JWTError, ValueError):
+            logger.info(f"🔑 JWT validated for agent {agent_id}")
+        except (JWTError, ValueError) as e:
+            logger.error(f"❌ JWT validation failed: {e}")
             await websocket.close(code=4001, reason="Invalid authentication token")
             return
 
         # Verify agent exists and is active
         agent = db.query(User).filter(User.id == agent_id).first()
         if not agent or not agent.is_active or agent.token_version != token_version:
+            logger.error(f"❌ Agent validation failed: agent={agent}, active={agent.is_active if agent else None}, token_version_match={agent.token_version == token_version if agent else None}")
             await websocket.close(code=4003, reason="Account restricted or session expired")
             return
 
@@ -77,6 +88,7 @@ async def websocket_crm_updates(
                 if has_access:
                     user_tenant_id = tenant_id
                 else:
+                    logger.error(f"❌ Tenant access denied: agent={agent_id}, tenant={tenant_id}")
                     await websocket.close(code=4003, reason="Access denied for this workspace")
                     return
         
@@ -88,25 +100,34 @@ async def websocket_crm_updates(
         
         # Keepalive loop
         while True:
-            data = await websocket.receive_text()
             try:
-                parsed = json.loads(data)
-                if parsed.get("type") == "ping":
-                    await websocket.send_json({
-                        "type": "pong",
-                        "server_time_utc": datetime.now(timezone.utc).isoformat()
-                    })
-            except json.JSONDecodeError:
-                pass
+                data = await websocket.receive_text()
+                try:
+                    parsed = json.loads(data)
+                    if parsed.get("type") == "ping":
+                        await websocket.send_json({
+                            "type": "pong",
+                            "server_time_utc": datetime.now(timezone.utc).isoformat()
+                        })
+                        logger.debug(f"🏓 Pong sent to agent {agent_id}")
+                except json.JSONDecodeError:
+                    logger.warning(f"📩 Non-JSON data received: {data[:100]}")
+            except WebSocketDisconnect:
+                logger.info(f"🔌 Agent {agent_id} disconnected normally")
+                break
+            except Exception as e:
+                logger.error(f"❌ Error in message loop: {e}")
+                break
 
     except WebSocketDisconnect:
         logger.info(f"ℹ️ [WS_CRM] Agent disconnected")
     except Exception as e:
-        logger.error(f"❌ [WS_CRM] Global error: {e}")
+        logger.error(f"❌ [WS_CRM] Global error: {e}", exc_info=True)
     finally:
         if 'agent_id' in locals() and 'user_tenant_id' in locals():
             from app.core.socket_manager import socket_manager
             socket_manager.disconnect(websocket, agent_id, user_tenant_id)
+            logger.info(f"🔌 Agent {agent_id} disconnected and cleaned up")
         db.close()
 
 
@@ -124,7 +145,7 @@ def _save_ws_message(
     sender_user_id: Optional[int] = None,
     sender_name: Optional[str] = None,
     sender_email: Optional[str] = None
-):
+) -> Optional[ChatMessage]:
     """Persist a WebSocket message to chat_messages with tenant/session scoping."""
     now_utc = datetime.now(timezone.utc)
     
@@ -140,6 +161,24 @@ def _save_ws_message(
     )
     
     if chat_session:
+        # --- DEDUPLICATION LOGIC ---
+        from datetime import timedelta
+        stale_cutoff = now_utc - timedelta(seconds=3)
+        duplicate = (
+            db.query(ChatMessage)
+            .filter(
+                ChatMessage.session_id == chat_session.session_id,
+                ChatMessage.message_type == sender_type,
+                ChatMessage.message_text == text,
+                ChatMessage.created_at_utc >= stale_cutoff
+            )
+            .first()
+        )
+        if duplicate:
+            logger.info(f"Duplicate WS message ignored: {text}")
+            return None
+        # ---------------------------
+
         # We must use the REAL internal session_id for the FK constraint
         msg = ChatMessage(
             tenant_id=chat_session.tenant_id,
@@ -157,8 +196,12 @@ def _save_ws_message(
 
         chat_session.last_activity_utc = now_utc
         chat_session.total_messages += 1
+        
+        db.commit()
+        db.refresh(msg)
+        return msg
 
-    db.commit()
+    return None
 
 
 @router.websocket("/ws/chat/{session_id}")
@@ -243,19 +286,31 @@ async def websocket_chat(
                         await websocket.close(code=4003, reason="Access denied for this workspace")
                         return
 
-            # Verify session belongs to agent's tenant (allow CLOSED sessions to be reactivated)
+            # Verify session exists and determine correct tenant context
+            logger.info(f"🔍 Looking for session {session_id} in tenant {user_tenant_id}")
             chat_session = (
                 db.query(ChatSession)
                 .filter(
                     (ChatSession.visitor_uuid == session_id) | (ChatSession.session_id == session_id),
-                    ChatSession.tenant_id == user_tenant_id, # ← TENANT ISOLATION
                     ChatSession.is_deleted == False
                 )
                 .first()
             )
+            
             if not chat_session:
-                await websocket.close(code=4004, reason="Session not found in your tenant")
+                logger.error(f"❌ Session {session_id} not found in any tenant")
+                await websocket.close(code=4004, reason="Session not found")
                 return
+            
+            # CRITICAL FIX: For super admin, always allow access to any tenant's session
+            if chat_session.tenant_id != user_tenant_id:
+                if agent.is_super_admin:
+                    logger.info(f"🔑 Super admin access granted to session in tenant {chat_session.tenant_id}")
+                    user_tenant_id = chat_session.tenant_id  # Update tenant context to match session
+                else:
+                    logger.error(f"❌ Session {session_id} found in tenant {chat_session.tenant_id}, but agent is in tenant {user_tenant_id}")
+                    await websocket.close(code=4004, reason=f"Session found in tenant {chat_session.tenant_id}, but you're in tenant {user_tenant_id}")
+                    return
 
             # Update agent attribution if not already set
             if not chat_session.assigned_agent_id:
@@ -340,7 +395,7 @@ async def websocket_chat(
                     # ⏰ INACTIVITY: Monitor
                     asyncio.create_task(send_inactivity_message(session_id, datetime.now(timezone.utc)))
                     
-                    # 🔥 Broadcast to CRM Dashboard
+                    # 🔥 Broadcast user message to CRM Dashboard
                     from app.core.socket_manager import socket_manager
                     await socket_manager.broadcast_event(
                         "NEW_MESSAGE",
@@ -348,10 +403,13 @@ async def websocket_chat(
                             "session_id": session_id,
                             "message": text,
                             "sender": "user",
-                            "purpose": "chat",  # ← Required for History/Live Chat routing
-                            "timestamp": datetime.now(timezone.utc).isoformat()
+                            "message_type": "user",
+                            "purpose": "crm_updates",  # ← CRITICAL: Use crm_updates purpose
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "msg_id": f"ws_user_{datetime.now(timezone.utc).timestamp()}",
+                            "created_at_ist": datetime.now(timezone.utc).strftime('%d %b, %I:%M %p')
                         },
-                        tenant_id=user_tenant_id  # ← Isolated
+                        tenant_id=user_tenant_id
                     )
 
                     # ✅ ALWAYS re-fetch session mode from DB to avoid stale cache
@@ -367,9 +425,10 @@ async def websocket_chat(
                             "type": "message",
                             "message": text,
                             "sender": "user",
+                            "session_id": session_id,
                         })
                     else:
-                        # Bot is handling
+                        # Bot is handling - process bot response
                         try:
                             from app.services.chatbot import ChatbotService
                             bot_response = ChatbotService.handle_message(
@@ -379,6 +438,9 @@ async def websocket_chat(
                             )
                             reply_text = bot_response.get("message", "")
                             if reply_text:
+                                # Save bot message to prevent duplication
+                                bot_msg = _save_ws_message(db, session_id, reply_text, "bot", user_tenant_id)
+                                
                                 # 🔵 Send to Visitor Widget
                                 await websocket.send_json({
                                     "type": "message",
@@ -389,9 +451,10 @@ async def websocket_chat(
                                     "type_hint": bot_response.get("type"),
                                     "cta_label": bot_response.get("cta_label"),
                                     "action": bot_response.get("action"),
+                                    "msg_id": bot_msg.id if bot_msg else None,
                                 })
 
-                                # 🔥 Broadcast to CRM Dashboard
+                                # 🔥 CRITICAL FIX: Broadcast bot message to CRM Dashboard
                                 from app.core.socket_manager import socket_manager
                                 await socket_manager.broadcast_event(
                                     "NEW_MESSAGE",
@@ -399,23 +462,29 @@ async def websocket_chat(
                                         "session_id": session_id,
                                         "message": reply_text,
                                         "sender": "bot",
-                                        "purpose": "chat", # ← Required for CRM routing
-                                        "timestamp": datetime.now(timezone.utc).isoformat()
+                                        "message_type": "bot",
+                                        "purpose": "crm_updates",  # ← CRITICAL: Use crm_updates purpose
+                                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                                        "msg_id": bot_msg.id if bot_msg else f"ws_bot_{datetime.now(timezone.utc).timestamp()}",
+                                        "message_status": "sent",
+                                        "created_at_ist": datetime.now(timezone.utc).strftime('%d %b, %I:%M %p')
                                     },
                                     tenant_id=user_tenant_id
                                 )
+                                logger.info(f"🔥 Bot message broadcast to CRM for session {session_id}")
                         except Exception as bot_err:
                             logger.error(f"Bot response error for session {session_id}: {bot_err}")
 
                 elif role == "agent":
-                    _save_ws_message(
+                    # Save agent message
+                    saved_msg = _save_ws_message(
                         db, session_id, text, "agent", user_tenant_id,
                         sender_user_id=agent_id,
                         sender_name=agent.full_name,
                         sender_email=agent.email
                     )
                     
-                    # 🔥 Broadcast to CRM Dashboard
+                    # 🔥 Broadcast agent message to CRM Dashboard
                     from app.core.socket_manager import socket_manager
                     await socket_manager.broadcast_event(
                         "NEW_MESSAGE",
@@ -423,18 +492,20 @@ async def websocket_chat(
                             "session_id": session_id,
                             "message": text,
                             "sender": "agent",
+                            "message_type": "agent",
                             "sender_name": agent.full_name,
                             "sender_email": agent.email,
-                            "purpose": "chat",
-                            "client_msg_id": data.get("client_msg_id"), # ← Echo back for deduplication
-                            "timestamp": datetime.now(timezone.utc).isoformat()
+                            "purpose": "crm_updates",  # ← CRITICAL: Use crm_updates purpose
+                            "msg_id": data.get("client_msg_id") or f"ws_agent_{datetime.now(timezone.utc).timestamp()}",
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "message_status": "sent",
+                            "created_at_ist": datetime.now(timezone.utc).strftime('%d %b, %I:%M %p')
                         },
                         tenant_id=user_tenant_id
                     )
 
                     # 🔧 ENHANCED LOGGING: Debug message routing
                     logger.info(f"[WS_AGENT] Attempting to send message to client for session: {session_id}")
-                    logger.info(f"[WS_AGENT] Available clients: {list(manager._clients.keys())}")
                     
                     normalized_sid = session_id.lower()
                     if manager.has_client(normalized_sid):
@@ -444,9 +515,58 @@ async def websocket_chat(
                             "message": text,
                             "sender": "agent",
                             "purpose": "chatbot",  # ← Required for Chatbot Widget routing
+                            "msg_id": saved_msg.id if saved_msg else None,
+                            "message_status": "delivered"
                         })
+                        
+                        # Update message status to delivered
+                        if saved_msg:
+                            # Broadcast delivery status to CRM
+                            await socket_manager.broadcast_event(
+                                "MESSAGE_STATUS_UPDATE",
+                                {
+                                    "msg_id": saved_msg.id,
+                                    "session_id": session_id,
+                                    "status": "delivered",
+                                    "timestamp": datetime.now(timezone.utc).isoformat()
+                                },
+                                tenant_id=user_tenant_id
+                            )
                     else:
-                        logger.warning(f"[WS_AGENT] No client connected for session {normalized_sid}. Available clients: {list(manager._clients.keys())}")
+                        logger.warning(f"[WS_AGENT] No client connected for session {normalized_sid}")
+
+                # ── Handle Message Read Receipt ──────────────────────────
+                elif msg_type == "message_read":
+                    msg_id = data.get("msg_id")
+                    if msg_id and role == "client":
+                        # Mark message as read
+                        message = db.query(ChatMessage).filter(
+                            ChatMessage.id == msg_id,
+                            ChatMessage.session_id.in_(
+                                db.query(ChatSession.session_id).filter(
+                                    (ChatSession.visitor_uuid == session_id) | (ChatSession.session_id == session_id)
+                                )
+                            )
+                        ).first()
+                        
+                        if message and not message.is_read:
+                            message.is_read = True
+                            message.read_at = datetime.now(timezone.utc)
+                            db.commit()
+                            
+                            # Broadcast read status to CRM
+                            from app.core.socket_manager import socket_manager
+                            await socket_manager.broadcast_event(
+                                "MESSAGE_STATUS_UPDATE",
+                                {
+                                    "msg_id": msg_id,
+                                    "session_id": session_id,
+                                    "status": "read",
+                                    "timestamp": datetime.now(timezone.utc).isoformat()
+                                },
+                                tenant_id=user_tenant_id
+                            )
+                    continue
 
             except (RuntimeError, ValueError) as e:
                 # Catch closed socket state errors to break the loop safely

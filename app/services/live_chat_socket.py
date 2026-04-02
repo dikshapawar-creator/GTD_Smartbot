@@ -95,7 +95,7 @@ class LiveChatSocketManager:
             }
         }, tenant_id=tenant_id)
 
-    async def notify_message(self, message, session, tenant_id: int):
+    async def notify_message(self, message, session, tenant_id: int, client_msg_id: str = None):
         """Notify agents and the visitor of a new message."""
         message_data = {
             'type': 'NEW_MESSAGE',
@@ -105,6 +105,7 @@ class LiveChatSocketManager:
             'message_text': message.message_text,
             'created_at_utc': message.created_at.isoformat() if message.created_at else None,
             'created_at_ist': format_ist_datetime(message.created_at),
+            'msg_id': client_msg_id or str(message.id)
         }
         
         # 1. Update all agent dashboards

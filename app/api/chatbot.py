@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from app.core.dependencies import get_db
 from app.core.config import settings
+from app.db.session import SessionLocal
 from app.models.chat_session import ChatSession, SessionStatus, ConversationMode
 
 from app.models.chat_message import ChatMessage
@@ -80,9 +81,8 @@ async def initialize_session(request: Request, response: Response, background_ta
     #         detail="Your access has been restricted due to security policy violations."
     #     )
 
-    # Real-time Geolocation
-    from app.services import geo_service
-    country, city, timezone_str = geo_service.lookup_ip_geo(client_ip)
+    # Geo-location is moved to background task to avoid blocking the init request
+    country, city, timezone_str = "Unknown", "Unknown", "UTC"
 
     visitor_uuid_ext = init_req.visitor_uuid if init_req else None
     
@@ -205,6 +205,26 @@ async def initialize_session(request: Request, response: Response, background_ta
 
     # ⏰ INACTIVITY: Monitor for 60s after first greeting
     background_tasks.add_task(send_inactivity_message, str(new_session.visitor_uuid), new_session.last_activity_utc)
+    
+    # 🌍 BACKGROUND GEO LOOKUP
+    if not existing_session and client_ip and client_ip not in ("127.0.0.1", "::1", ""):
+        from app.services.geo_service import lookup_ip_geo
+        
+        def bg_geo_update(session_id: str, ip: str):
+            with SessionLocal() as bg_db:
+                try:
+                    c, ct, tz = lookup_ip_geo(ip)
+                    if c != "Unknown" or ct != "Unknown":
+                        sess = bg_db.query(ChatSession).filter(ChatSession.session_id == session_id).first()
+                        if sess:
+                            sess.country = c
+                            sess.city = ct
+                            sess.timezone = tz
+                            bg_db.commit()
+                except Exception as e:
+                    logger.error(f"Background geo lookup failed: {e}")
+                    
+        background_tasks.add_task(bg_geo_update, new_session.session_id, client_ip)
     
     return result_resp
 
@@ -390,9 +410,10 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
                 "session_id": str(active_session.visitor_uuid),
                 "message": user_message,
                 "sender": "user",
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.utcnow().isoformat(),
+                "msg_id": f"rest_user_{datetime.utcnow().timestamp()}"
             },
-            tenant_id=active_session.tenant_id  # ← Isolated
+            tenant_id=active_session.tenant_id
         )
         await socket_manager.broadcast_event(
             "NEW_MESSAGE",
@@ -400,9 +421,10 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
                 "session_id": str(active_session.visitor_uuid),
                 "message": bot_message,
                 "sender": "bot",
-                "timestamp": datetime.now(timezone.utc).isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "msg_id": f"rest_bot_{datetime.now(timezone.utc).timestamp()}"
             },
-            tenant_id=active_session.tenant_id  # ← Isolated
+            tenant_id=active_session.tenant_id
         )
         
         # If lead was updated, broadcast session update
@@ -546,6 +568,8 @@ async def get_chat_history(request: Request, db: Session = Depends(get_db)):
             "type": m_type,
             "conversation_status": active_session.conversation_mode,
             "created_at_ist": msg_obj.created_at_ist if hasattr(msg_obj, 'created_at_ist') else None,
+            "is_read": bool(getattr(msg_obj, 'is_read', False)),
+            "read_at": msg_obj.read_at.isoformat() if getattr(msg_obj, 'read_at', None) else None,
         })
 
     return history

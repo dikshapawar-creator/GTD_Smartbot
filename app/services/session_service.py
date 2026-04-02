@@ -409,6 +409,23 @@ def save_message(db: Session, session: ChatSession, message_text: str, message_t
     """Save a message to the database (synchronous version for backward compatibility)."""
     now = datetime.utcnow()
     
+    # --- DEDUPLICATION LOGIC ---
+    from datetime import timedelta
+    stale_cutoff = now - timedelta(seconds=3)
+    duplicate = (
+        db.query(ChatMessage)
+        .filter(
+            ChatMessage.session_id == session.session_id,
+            ChatMessage.message_type == message_type,
+            ChatMessage.message_text == message_text,
+            ChatMessage.created_at_utc >= stale_cutoff
+        )
+        .first()
+    )
+    if duplicate:
+        return duplicate
+    # ---------------------------
+    
     message = ChatMessage(
         session_id=session.session_id,  # Use session_id (string) not id (BigInteger)
         tenant_id=session.tenant_id,   # 🧪 CRITICAL: Link message to session's tenant

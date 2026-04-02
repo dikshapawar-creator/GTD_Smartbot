@@ -331,4 +331,5 @@ def create_app() -> FastAPI:
 
     return app
 
+# Trigger reload for schema sync
 app = create_app()

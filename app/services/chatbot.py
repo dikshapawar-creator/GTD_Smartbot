@@ -181,7 +181,13 @@ class ChatbotService:
             repeat_msg = ChatbotService._get_dynamic_response(
                 db, 
                 "FALLBACK_REPEAT", 
-                "Our team will connect with you shortly.",
+                """We’ve received your message and will get back to you soon.
+ 
+For more details, feel free to reach us anytime:
+💬- https://wa.me
+📞 WhatsApp: +91 8527376675
+ 
+We’ll be happy to assist you with complete support.""",
                 chat_session.tenant_id
             )
             session_service.save_message(db, chat_session, repeat_msg, "bot", commit=commit)
