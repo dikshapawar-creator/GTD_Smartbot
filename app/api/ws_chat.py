@@ -526,8 +526,19 @@ async def websocket_chat(
                         (ChatSession.visitor_uuid == session_id) | (ChatSession.session_id == session_id)
                     ).first()
 
-                    if fresh_session and fresh_session.conversation_mode == ConversationMode.HUMAN:
-                        logger.info(f"Relaying client message to agent for session {session_id}")
+                    # 🚨 AGENT SILENCE RULE: If agent is active, skip bot logic
+                    is_human_mode = (
+                        fresh_session and (
+                            fresh_session.conversation_mode == ConversationMode.HUMAN or
+                            fresh_session.current_mode == ConversationMode.HUMAN or
+                            fresh_session.agent_joined or
+                            fresh_session.is_locked or
+                            fresh_session.assigned_agent_id is not None
+                        )
+                    )
+
+                    if is_human_mode:
+                        logger.info(f"Relaying client message to agent for session {session_id} (HUMAN MODE)")
                         await manager.send_to_agent(session_id, {
                             "type": "message",
                             "message": text,
@@ -535,6 +546,12 @@ async def websocket_chat(
                             "session_id": session_id,
                         })
                     else:
+                        # Re-activate session if it was CLOSED but receiving new message in BOT mode
+                        if fresh_session and fresh_session.session_status == SessionStatus.CLOSED:
+                            fresh_session.session_status = SessionStatus.ACTIVE
+                            db.commit()
+                            logger.info(f"Re-activated closed session {session_id} for bot response")
+
                         # Bot is handling - process bot response
                         try:
                             from app.services.chatbot import ChatbotService

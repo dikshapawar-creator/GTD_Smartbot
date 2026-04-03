@@ -107,28 +107,36 @@ async def send_inactivity_message(session_id: str, last_activity_timestamp: date
                 logger.debug(f"Monitor: Nudge already sent for {session_id}.")
                 return
 
-            logger.info(f"Monitor: Sending nudge for {chat_session.session_id}")
+            logger.info(f"Monitor: Sending nudge for {chat_session.session_id} (visitor_uuid: {chat_session.visitor_uuid})")
             
             # Persist and Broadcast
             new_msg = session_service.save_message(db, chat_session, inactivity_msg, "bot")
             db.commit()
             
-            crm_session_id = str(chat_session.visitor_uuid)
+            crm_session_id = str(chat_session.visitor_uuid).lower()
             from app.core.socket_manager import socket_manager
+            
+            # 1. CRM Broadcast
             await socket_manager.broadcast_event("NEW_MESSAGE", {
                 "session_id": crm_session_id,
                 "message": inactivity_msg,
                 "sender": "bot",
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }, tenant_id=chat_session.tenant_id)
+            logger.info(f"Monitor: Nudge broadcast to CRM for session {crm_session_id}")
             
-            if ws_manager.has_client(crm_session_id.lower()):
-                await ws_manager.send_to_client(crm_session_id.lower(), {
+            # 2. Widget WebSocket Delivery
+            if ws_manager.has_client(crm_session_id):
+                logger.info(f"Monitor: Client socket found for {crm_session_id}, sending nudge...")
+                await ws_manager.send_to_client(crm_session_id, {
                     "type": "message",
                     "message": inactivity_msg,
                     "sender": "bot",
                     "is_inactivity": True
                 })
+                logger.info(f"Monitor: Nudge sent to client WebSocket for {crm_session_id}")
+            else:
+                logger.warning(f"Monitor: No active client socket found for {crm_session_id}. Nudge saved to history only.")
         finally:
             db.close()
     except Exception as e:

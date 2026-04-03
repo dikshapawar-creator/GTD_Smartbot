@@ -266,12 +266,28 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
         logger.error(f"Invalid session UUID format: {session_id}, error: {e}")
         raise HTTPException(status_code=401, detail="Invalid session format.")
 
-    # A. Check for Agent activity or Handoff state (Silence Rule)
+    # A. Reactivate CLOSED session if it's in BOT mode
+    if active_session.session_status == SessionStatus.CLOSED:
+        is_bot_mode = (
+            active_session.conversation_mode == ConversationMode.BOT and
+            active_session.current_mode == ConversationMode.BOT and
+            not active_session.agent_joined and
+            active_session.assigned_agent_id is None
+        )
+        if is_bot_mode:
+            logger.info(f"Re-activating closed session {active_session.session_id} for bot response (REST)")
+            active_session.session_status = SessionStatus.ACTIVE
+            active_session.is_active = True
+            db.commit()
+
+    # B. Check for Agent activity or Handoff state (Silence Rule)
     is_agent_active = (
         active_session.agent_joined or 
         active_session.assigned_agent_id is not None or 
+        active_session.is_locked or
         active_session.chat_state == ChatState.HANDOFF_SENT.value or
-        active_session.conversation_mode == ConversationMode.HUMAN
+        active_session.conversation_mode == ConversationMode.HUMAN or
+        active_session.current_mode == ConversationMode.HUMAN
     )
 
     if not is_agent_active:
@@ -312,6 +328,12 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
             "conversation_status": active_session.conversation_mode,
             "server_time_utc": datetime.now(timezone.utc)
         }
+
+    # B. Re-activate session if it was CLOSED but receiving new message in BOT mode
+    if active_session.session_status == SessionStatus.CLOSED:
+        active_session.session_status = SessionStatus.ACTIVE
+        db.flush() # Sync but no commit yet
+        logger.info(f"Re-activated closed session {active_session.session_id} for REST bot response")
 
     # ── 2. INTENT & LEAD LOGIC ──────────────────────────────────────────
     user_message = msg_req.message
@@ -458,6 +480,10 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
         # Determine Response Type (CTA or MESSAGE)
         res_type = ResponseType.CTA if chatbot_response.get("type") == "CTA" else ResponseType.MESSAGE
         
+        # ⏰ INACTIVITY MONITOR: Reset timer on every message
+        from app.services.inactivity_service import send_inactivity_message
+        background_tasks.add_task(send_inactivity_message, str(active_session.visitor_uuid), active_session.last_activity_utc)
+
         return await broadcast_and_return(bot_msg, {
             "sessionId": str(active_session.visitor_uuid),
             "message": bot_msg,

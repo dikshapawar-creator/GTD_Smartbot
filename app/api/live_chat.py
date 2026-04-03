@@ -206,19 +206,27 @@ async def get_messages(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    # Get messages for ALL sessions belonging to this visitor
+    # Get messages for ALL sessions belonging to this visitor or lead
     # This unified view helps agents see the full context of returning visitors
+    
+    # Base filter: same visitor UUID
+    filter_cond = (ChatSession.visitor_uuid == session.visitor_uuid)
+    
+    # Expanded filter: same lead ID (cross-device context)
+    if session.lead_id:
+        filter_cond = or_(filter_cond, ChatSession.lead_id == session.lead_id)
+        
     stmt = (
         select(ChatMessage)
         .join(ChatSession, ChatMessage.session_id == ChatSession.session_id)
         .where(
             and_(
-                ChatSession.visitor_uuid == session.visitor_uuid,
+                filter_cond,
                 ChatSession.tenant_id == tenant_id,
                 ChatSession.is_deleted == False
             )
         )
-        .order_by(ChatMessage.created_at_utc.asc())  # Use UTC timestamp for consistent ordering
+        .order_by(ChatMessage.created_at_utc.desc())  # 🔥 Get LATEST first for proper pagination
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
@@ -226,7 +234,10 @@ async def get_messages(
     result = db.execute(stmt)
     messages = list(result.scalars().all())
     
-    logger.info(f"GET_MESSAGES: Found {len(messages)} messages for visitor {session_uuid}")
+    # 🔃 Reverse back to ASC for the frontend chat view (oldest at top)
+    messages.reverse()
+    
+    logger.info(f"GET_MESSAGES: Found {len(messages)} messages for visitor {session_uuid} (linked search: {'lead_id=' + str(session.lead_id) if session.lead_id else 'uuid only'})")
     
     # Convert to frontend format
     items = []
@@ -353,13 +364,28 @@ async def intervene_session(
     db.commit()
     db.refresh(session)
     
-    # Get recent message history for agent context
+    # Get recent message history for agent context (consolidated history)
     from app.models.chat_message import ChatMessage
+    from sqlalchemy import or_
+    
+    # Base filter: current session
+    hist_cond = (ChatMessage.session_id == session.session_id)
+    
+    # Expanded filter: same visitor UUID or lead ID (cross-session context)
+    # Using a join for more robust matching of all related messages
     recent_messages = (
         db.query(ChatMessage)
-        .filter(ChatMessage.session_id == session.session_id)
+        .join(ChatSession, ChatMessage.session_id == ChatSession.session_id)
+        .filter(
+            or_(
+                ChatSession.visitor_uuid == session.visitor_uuid,
+                ChatSession.lead_id == session.lead_id if session.lead_id else False
+            ),
+            ChatSession.tenant_id == tenant_id,
+            ChatSession.is_deleted == False
+        )
         .order_by(ChatMessage.created_at_utc.desc())
-        .limit(20)
+        .limit(50)  # Agent needs more context after takeover
         .all()
     )
     
@@ -503,10 +529,18 @@ async def close_session(
     if not session:
         raise HTTPException(status_code=404, detail="Active session not found")
     
-    # Update session to close it
+    # Update session to close it - but reset mode to BOT for potential reactivation
     session.session_status = SessionStatus.CLOSED
-    session.is_locked = False
+    session.conversation_mode = ConversationMode.BOT
+    session.current_mode = ConversationMode.BOT
+    # Clear assignment to allow bot takeover
+    session.assigned_agent_id = None
+    session.assigned_agent_email = None
+    session.assigned_agent_name = None
+    session.agent_name = None
     session.agent_joined = False
+    session.is_locked = False
+    
     session.closed_by_agent_id = current_user.id
     session.closed_by_agent_email = current_user.email
     session.closed_by_agent_name = current_user.full_name

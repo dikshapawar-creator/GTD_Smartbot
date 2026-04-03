@@ -295,7 +295,7 @@ def get_active_session(db: Session, session_id: str, tenant_id: int = None) -> O
             .where(
                 and_(
                     ChatSession.visitor_uuid == session_id,
-                    ChatSession.session_status == SessionStatus.ACTIVE,
+                    ChatSession.session_status.in_([SessionStatus.ACTIVE, SessionStatus.CLOSED]),
                     ChatSession.tenant_id == tenant_id
                 )
             )
@@ -314,7 +314,7 @@ def get_active_session(db: Session, session_id: str, tenant_id: int = None) -> O
             .where(
                 and_(
                     ChatSession.session_id == session_id,
-                    ChatSession.session_status == SessionStatus.ACTIVE,
+                    ChatSession.session_status.in_([SessionStatus.ACTIVE, SessionStatus.CLOSED]),
                     ChatSession.tenant_id == tenant_id
                 )
             )
