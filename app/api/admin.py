@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import func, Column, Integer, ForeignKey
 from typing import List, Optional
@@ -11,6 +11,7 @@ from app.models.lead import Lead, LeadStatus
 from app.models.chat_session import ChatSession, SessionStatus
 from app.models.chat_message import ChatMessage
 from app.models.blocked import BlockedVisitor
+from app.core.tenant_resolver import TenantResolver
 
 router = APIRouter(prefix="/admin", tags=["Administration (High Privilege)"])
 
@@ -156,38 +157,54 @@ def get_dashboard_stats(
 
 @router.get("/security/blocked-ips")
 def list_blocked_ips(
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(2))
 ):
     """List all manually blocked visitor IPs."""
+    target_tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
     blocked = db.query(BlockedVisitor).filter(
-        BlockedVisitor.tenant_id == current_user.tenant_id
+        BlockedVisitor.tenant_id == target_tenant_id
     ).order_by(BlockedVisitor.blocked_at.desc()).all()
     
     return [
         {
             "id": b.id,
-            "ip": b.ip_address,
+            "ip": b.ip_address or f"Unknown [{b.visitor_fingerprint}]",
             "fingerprint": b.visitor_fingerprint,
             "reason": b.reason,
             "time": b.blocked_at.isoformat()
         } for b in blocked
     ]
 
+@router.delete("/security/unblock-all")
+def unblock_all_visitors(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(2))
+):
+    """Emergency endpoint to clear all blocks for the tenant."""
+    target_tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
+    db.query(BlockedVisitor).filter(BlockedVisitor.tenant_id == target_tenant_id).delete()
+    db.commit()
+    return {"message": "All IPs unblocked successfully!"}
+
 @router.post("/security/block-ip")
 def block_visitor_ip(
     ip_data: dict,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(2))
 ):
     """Manually block a specific IP address."""
+    target_tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
     ip = ip_data.get("ip")
     if not ip:
         return {"error": "IP address is required"}
         
     # Check if already blocked
     existing = db.query(BlockedVisitor).filter(
-        BlockedVisitor.tenant_id == current_user.tenant_id,
+        BlockedVisitor.tenant_id == target_tenant_id,
         BlockedVisitor.ip_address == ip
     ).first()
     
@@ -195,7 +212,7 @@ def block_visitor_ip(
         return {"message": "IP already blocked", "id": existing.id}
         
     new_block = BlockedVisitor(
-        tenant_id=current_user.tenant_id,
+        tenant_id=target_tenant_id,
         ip_address=ip,
         reason=ip_data.get("reason", "Manual block"),
         blocked_at=datetime.utcnow()
@@ -209,13 +226,15 @@ def block_visitor_ip(
 @router.delete("/security/unblock-ip/{block_id}")
 def unblock_visitor_ip(
     block_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(2))
 ):
     """Remove an IP block record."""
+    target_tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
     block = db.query(BlockedVisitor).filter(
         BlockedVisitor.id == block_id,
-        BlockedVisitor.tenant_id == current_user.tenant_id
+        BlockedVisitor.tenant_id == target_tenant_id
     ).first()
     
     if not block:
@@ -229,13 +248,15 @@ def unblock_visitor_ip(
 def update_block_reason(
     block_id: int,
     data: dict,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(2))
 ):
     """Update the reason for a blocked IP."""
+    target_tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
     block = db.query(BlockedVisitor).filter(
         BlockedVisitor.id == block_id,
-        BlockedVisitor.tenant_id == current_user.tenant_id
+        BlockedVisitor.tenant_id == target_tenant_id
     ).first()
     
     if not block:

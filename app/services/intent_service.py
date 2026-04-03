@@ -81,6 +81,7 @@ def detect_intent(db: Session, message: str, tenant_id: int) -> str:
                     logger.error(f"Database error querying IntentConfig for tenant {target_id}: {db_error}")
                     return None, 0
                     
+                logger.info(f"[INTENT] Loaded {len(configs)} active configs for tenant {target_id}. Keys: {[c.intent_key for c in configs]}")
                 intent_cache[target_id] = {"data": configs, "expiry": now + CACHE_TTL}
                 logger.debug(f"Intent cache refreshed for tenant {target_id}")
 

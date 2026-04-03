@@ -526,16 +526,20 @@ async def websocket_chat(
                         (ChatSession.visitor_uuid == session_id) | (ChatSession.session_id == session_id)
                     ).first()
 
-                    # 🚨 AGENT SILENCE RULE: If agent is active, skip bot logic
-                    is_human_mode = (
-                        fresh_session and (
-                            fresh_session.conversation_mode == ConversationMode.HUMAN or
-                            fresh_session.current_mode == ConversationMode.HUMAN or
-                            fresh_session.agent_joined or
-                            fresh_session.is_locked or
-                            fresh_session.assigned_agent_id is not None
-                        )
-                    )
+                    # 🚨 AGENT SILENCE RULE: If mode is explicitly BOT, bot takes over.
+                    # Otherwise, check for agent activity/assignment.
+                    is_human_mode = False
+                    if fresh_session:
+                        if fresh_session.conversation_mode == ConversationMode.BOT:
+                             is_human_mode = False
+                        else:
+                            is_human_mode = (
+                                fresh_session.conversation_mode == ConversationMode.HUMAN or
+                                fresh_session.current_mode == ConversationMode.HUMAN or
+                                fresh_session.agent_joined or
+                                fresh_session.is_locked or
+                                fresh_session.assigned_agent_id is not None
+                            )
 
                     if is_human_mode:
                         logger.info(f"Relaying client message to agent for session {session_id} (HUMAN MODE)")

@@ -698,18 +698,29 @@ async def block_visitor(
     session.is_locked = False
     session.last_activity_at = datetime.utcnow()
     
+    # ✅ Persist the block to blocked_visitors table so it can be listed/unblocked
+    from app.models.blocked import BlockedVisitor
+    client_ip = session.initial_ip or session.last_ip
+    visitor_fp = session.visitor_fingerprint
+
+    if client_ip:
+        # Avoid duplicates
+        existing_block = db.query(BlockedVisitor).filter(
+            BlockedVisitor.tenant_id == tenant_id,
+            BlockedVisitor.ip_address == client_ip
+        ).first()
+        if not existing_block:
+            block_record = BlockedVisitor(
+                tenant_id=tenant_id,
+                ip_address=client_ip,
+                visitor_fingerprint=visitor_fp,
+                reason=f"Blocked by agent via CRM (session: {session_uuid})"
+            )
+            db.add(block_record)
+
     db.commit()
     
-    # Notify via WebSocket using existing infrastructure
-    try:
-        socket_manager = get_live_chat_socket()
-        if socket_manager:
-            await socket_manager.notify_session_updated(session, session.tenant_id)
-    except Exception as e:
-        print(f"WebSocket notification failed: {e}")
-        # Continue without WebSocket - REST API still works
-    
-    return {"message": "Visitor blocked successfully"}
+    return {"message": "Visitor blocked successfully", "ip": client_ip}
 
 
 def _get_lead_status(score: int) -> str:
@@ -880,6 +891,7 @@ def consolidate_visitor_sessions(db: Session, visitor_uuid: str, tenant_id: int)
         keep_session.conversation_mode = ConversationMode.BOT
         keep_session.is_locked = False
         keep_session.agent_joined = False
+        keep_session.spam_flag = False  # Ensure returning unblocked users aren't still flagged as spam
         keep_session.last_activity_at = datetime.utcnow()
         keep_session.last_activity_utc = datetime.utcnow()
     

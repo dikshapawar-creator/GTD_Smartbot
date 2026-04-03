@@ -39,6 +39,7 @@ async def lifespan(app: FastAPI):
     try:
         import os
         import shutil
+        
         # init_db() now handles its own internal error logging and suppression
         init_db()
 
@@ -192,12 +193,14 @@ def create_app() -> FastAPI:
             exempt_paths = ["/health", "/", "/debug-logs", "/debug-db", "/favicon.ico"]
             is_exempt = request.url.path in exempt_paths or \
                         request.url.path.startswith("/auth") or \
+                        request.url.path.startswith("/admin") or \
+                        request.url.path.startswith("/live-chat") or \
+                        request.url.path.startswith("/intents") or \
+                        request.url.path.startswith("/leads") or \
                         request.url.path.startswith("/static") or \
                         request.url.path.startswith("/docs") or \
                         request.url.path.startswith("/openapi.json") or \
                         request.url.path.startswith("/redoc") or \
-                        request.url.path.startswith("/live-chat/debug") or \
-                        request.url.path.startswith("/live-chat/test-message") or \
                         "/test-message/" in request.url.path  # Additional check for test endpoints
             
             if not tenant_id and not is_exempt:

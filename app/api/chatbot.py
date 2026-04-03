@@ -290,11 +290,14 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
         active_session.current_mode == ConversationMode.HUMAN
     )
 
-    if not is_agent_active:
-        # Fallback check for last message from agent
+    if not is_agent_active and active_session.conversation_mode != ConversationMode.BOT:
+        # Fallback check for last message from agent (Staleness: 30 minutes)
+        from datetime import timedelta
+        stale_cutoff = datetime.utcnow() - timedelta(minutes=30)
         recent_agent_msg = db.query(ChatMessage).filter(
             ChatMessage.session_id == active_session.session_id,
-            ChatMessage.message_type == "agent"
+            ChatMessage.message_type == "agent",
+            ChatMessage.created_at_utc >= stale_cutoff
         ).order_by(ChatMessage.created_at_utc.desc()).first()
         if recent_agent_msg:
             active_session.agent_joined = True
