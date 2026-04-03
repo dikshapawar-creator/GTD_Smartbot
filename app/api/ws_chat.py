@@ -149,6 +149,12 @@ def _save_ws_message(
     """Persist a WebSocket message to chat_messages with tenant/session scoping."""
     now_utc = datetime.now(timezone.utc)
     
+    # Fix potential UTF-16 encoding issues before processing
+    if text and '\x00' in text:
+        original_text = text
+        text = text.replace('\x00', '')
+        logger.warning(f"Fixed UTF-16 encoding in _save_ws_message for session {session_id}: {len(original_text)} -> {len(text)} chars")
+    
     # Update session activity — scope by tenant_id for isolation safety
     chat_session = (
         db.query(ChatSession)
@@ -175,7 +181,7 @@ def _save_ws_message(
             .first()
         )
         if duplicate:
-            logger.info(f"Duplicate WS message ignored: {text}")
+            logger.info(f"Duplicate WS message ignored: [{sender_type}] {text[:50]}{'...' if len(text) > 50 else ''}")
             return None
         # ---------------------------
 
@@ -480,6 +486,12 @@ async def websocket_chat(
                     continue
 
                 text = data.get("message", "").strip()
+                
+                # Fix potential UTF-16 encoding issues
+                if text and '\x00' in text:
+                    text = text.replace('\x00', '')
+                    logger.warning(f"Fixed UTF-16 encoding in WebSocket message for session {session_id}")
+                
                 if not text:
                     continue
 
@@ -532,16 +544,33 @@ async def websocket_chat(
                                 user_message=text
                             )
                             reply_text = bot_response.get("message", "")
+                            
+                            # ⚡ CRITICAL: Fix potential UTF-16 encoding issues (null bytes)
+                            # This prevents character-by-character streaming on some environments.
+                            if isinstance(reply_text, str) and ('\x00' in reply_text or '\u0000' in reply_text):
+                                reply_text = reply_text.replace('\x00', '').replace('\u0000', '')
+                                logger.warning(f"Fixed UTF-16 encoding in bot response for session {session_id}")
+                            
                             if reply_text:
-                                # Save bot message to prevent duplication
-                                bot_msg = _save_ws_message(db, session_id, reply_text, "bot", user_tenant_id)
+                                # ⚡ IMPORTANT: ChatbotService.handle_message ALREADY saves the message to DB.
+                                # To avoid "Duplicate WS message ignored" logs and double-persisting, 
+                                # we should only use _save_ws_message if we need the msg_id and it wasn't saved.
+                                # But actually, handle_message is the source of truth now.
+                                
+                                # Fetch the last bot message for this session to get the ID if needed
+                                from app.models.chat_message import ChatMessage
+                                bot_msg = db.query(ChatMessage).filter(
+                                    ChatMessage.session_id == session_id,
+                                    ChatMessage.message_type == "bot"
+                                ).order_by(ChatMessage.id.desc()).first()
                                 
                                 # 🔵 Send to Visitor Widget
+                                # Ensure we send a valid JSON with a clean string
                                 await websocket.send_json({
                                     "type": "message",
-                                    "message": reply_text,
+                                    "message": str(reply_text), 
                                     "sender": "bot",
-                                    "purpose": "chatbot", # ← Required for Widget routing
+                                    "purpose": "chatbot",
                                     "state": bot_response.get("state"),
                                     "type_hint": bot_response.get("type"),
                                     "cta_label": bot_response.get("cta_label"),
@@ -549,16 +578,16 @@ async def websocket_chat(
                                     "msg_id": bot_msg.id if bot_msg else None,
                                 })
 
-                                # 🔥 CRITICAL FIX: Broadcast bot message to CRM Dashboard
+                                # 🔥 Broadcast bot message to CRM Dashboard
                                 from app.core.socket_manager import socket_manager
                                 await socket_manager.broadcast_event(
                                     "NEW_MESSAGE",
                                     {
                                         "session_id": session_id,
-                                        "message": reply_text,
+                                        "message": str(reply_text),
                                         "sender": "bot",
                                         "message_type": "bot",
-                                        "purpose": "crm_updates",  # ← CRITICAL: Use crm_updates purpose
+                                        "purpose": "crm_updates",
                                         "timestamp": datetime.now(timezone.utc).isoformat(),
                                         "msg_id": bot_msg.id if bot_msg else f"ws_bot_{datetime.now(timezone.utc).timestamp()}",
                                         "message_status": "sent",

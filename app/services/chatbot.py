@@ -20,13 +20,24 @@ from app.models.intent_config import IntentConfig
 class ChatbotService:
     @staticmethod
     def _get_dynamic_response(db: Session, intent_key: str, default: str, tenant_id: int) -> str:
-        """Helper to fetch responses from the active tenant's config."""
+        """Fetch response template for a given intent and tenant."""
+        from app.models.intent_config import IntentConfig
+        
         config = db.query(IntentConfig).filter(
             IntentConfig.intent_key == intent_key,
             IntentConfig.tenant_id == tenant_id,
             IntentConfig.is_active == True
         ).first()
-        return config.response_text if (config and config.response_text) else default
+        
+        response = config.response_text if (config and config.response_text) else default
+        
+        # ⚡ CRITICAL: Fix potential UTF-16 encoding issues (null bytes)
+        # This prevents character-by-character streaming on some environments.
+        if isinstance(response, str) and ('\x00' in response or '\u0000' in response):
+            response = response.replace('\x00', '').replace('\u0000', '')
+            logger.warning(f"Fixed UTF-16 encoding in intent response for {intent_key}")
+            
+        return str(response) if response is not None else ""
 
     @staticmethod
     def get_state_question(db: Session, state: ChatState) -> str:
@@ -52,6 +63,10 @@ class ChatbotService:
         import re
         if not text:
             return ""
+        
+        # Fix potential UTF-16 encoding issues first
+        if '\x00' in text:
+            text = text.replace('\x00', '')
             
         # Target phrases like "Please share your email", "Provide your name", etc.
         patterns = [

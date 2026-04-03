@@ -409,6 +409,11 @@ def save_message(db: Session, session: ChatSession, message_text: str, message_t
     """Save a message to the database (synchronous version for backward compatibility)."""
     now = datetime.utcnow()
     
+    # Fix potential UTF-16 encoding issues
+    if message_text and '\x00' in message_text:
+        message_text = message_text.replace('\x00', '')
+        logger.warning(f"Fixed UTF-16 encoding in message for session {session.session_id}")
+    
     # --- DEDUPLICATION LOGIC ---
     from datetime import timedelta
     stale_cutoff = now - timedelta(seconds=3)
