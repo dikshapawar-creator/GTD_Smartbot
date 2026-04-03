@@ -48,6 +48,7 @@ async def send_inactivity_message(session_id: str, last_activity_timestamp: date
             
             if diff >= 60:
                 # We have been inactive for at least 60 seconds
+                logger.info(f"Monitor: Session {session_id} inactive for {diff:.1f}s, sending nudge")
                 break
             
             # Still active or recently used. Wait the remaining time + jitter

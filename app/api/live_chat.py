@@ -32,7 +32,32 @@ async def get_conversations(
 ):
     """Get all active conversations for the live chat dashboard."""
     tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
+    logger.info(f"📊 Fetching conversations for tenant {tenant_id} (user: {current_user.id}, super_admin: {getattr(current_user, 'is_super_admin', False)})")
+    
+    # PROACTIVE CLEANUP: Consolidate any duplicate sessions before fetching
+    from sqlalchemy import select, func
+    
+    # Find all visitor UUIDs that have multiple active sessions
+    duplicate_visitors_stmt = (
+        select(ChatSession.visitor_uuid)
+        .where(
+            ChatSession.tenant_id == tenant_id,
+            ChatSession.session_status.in_([SessionStatus.ACTIVE, SessionStatus.BOT, SessionStatus.HUMAN]),
+            ChatSession.is_deleted == False
+        )
+        .group_by(ChatSession.visitor_uuid)
+        .having(func.count(ChatSession.id) > 1)
+    )
+    
+    duplicate_visitors = db.execute(duplicate_visitors_stmt).scalars().all()
+    
+    # Consolidate each visitor's sessions
+    for visitor_uuid in duplicate_visitors:
+        logger.info(f"🔧 Consolidating duplicate sessions for visitor {visitor_uuid}")
+        consolidate_visitor_sessions(db, visitor_uuid, tenant_id)
+    
     sessions = get_active_sessions_sync(db, tenant_id=tenant_id)
+    logger.info(f"📊 Found {len(sessions)} active sessions for tenant {tenant_id}")
     
     # Convert to frontend format
     conversations = []
@@ -80,6 +105,47 @@ async def get_conversations(
     return conversations
 
 
+@router.get("/session-details/{session_uuid}")
+async def get_session_details(
+    session_uuid: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Get session details including tenant_id for super admin tenant switching."""
+    # Find the session
+    from sqlalchemy import select, and_
+    stmt = (
+        select(ChatSession)
+        .where(
+            and_(
+                ChatSession.visitor_uuid == session_uuid,
+                ChatSession.is_deleted == False
+            )
+        )
+        .limit(1)
+    )
+    result = db.execute(stmt)
+    session = result.scalar_one_or_none()
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    # Check if user has access to this session's tenant
+    if not current_user.is_super_admin:
+        tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
+        if session.tenant_id != tenant_id:
+            raise HTTPException(status_code=403, detail="Access denied")
+    
+    return {
+        "session_id": session.session_id,
+        "visitor_uuid": session.visitor_uuid,
+        "tenant_id": session.tenant_id,
+        "session_status": session.session_status,
+        "current_mode": session.current_mode
+    }
+
+
 @router.get("/analytics")
 async def get_analytics(
     request: Request,
@@ -115,8 +181,12 @@ async def get_messages(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
-    """Get messages for a specific session."""
+    """Get messages for a specific session, including consolidated history."""
     tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
+    
+    # CRITICAL FIX: Consolidate sessions for this visitor first
+    consolidated_session = consolidate_visitor_sessions(db, session_uuid, tenant_id)
+    
     # Find the most recent session by visitor UUID (active or ended)
     stmt = (
         select(ChatSession)
@@ -148,7 +218,7 @@ async def get_messages(
                 ChatSession.is_deleted == False
             )
         )
-        .order_by(ChatMessage.created_at.asc())
+        .order_by(ChatMessage.created_at_utc.asc())  # Use UTC timestamp for consistent ordering
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
@@ -156,19 +226,21 @@ async def get_messages(
     result = db.execute(stmt)
     messages = list(result.scalars().all())
     
+    logger.info(f"GET_MESSAGES: Found {len(messages)} messages for visitor {session_uuid}")
+    
     # Convert to frontend format
     items = []
     for msg in messages:
         items.append({
             "id": msg.id,
-            "session_id": session_uuid,
+            "session_id": session_uuid,  # Use visitor_uuid for consistency
             "message_type": msg.message_type,
             "message_text": msg.message_text,
             "sender_user_id": msg.sender_user_id,
             "sender_name": msg.sender_name,
             "sender_email": msg.sender_email,
-            "created_at_utc": msg.created_at.isoformat() if msg.created_at else None,
-            "created_at_ist": format_ist_datetime(msg.created_at),
+            "created_at_utc": msg.created_at_utc.isoformat() if msg.created_at_utc else None,
+            "created_at_ist": format_ist_datetime(msg.created_at_utc),
             "is_read": bool(getattr(msg, 'is_read', False)),
             "read_at": msg.read_at.isoformat() if getattr(msg, 'read_at', None) else None,
         })
@@ -742,13 +814,12 @@ def consolidate_visitor_sessions(db: Session, visitor_uuid: str, tenant_id: int)
     from sqlalchemy import select
     from datetime import datetime
     
-    # Look for ALL active sessions for this visitor (no time cutoff to ensure cleanup)
+    # Look for ALL sessions for this visitor (including closed ones to consolidate properly)
     stmt = (
         select(ChatSession)
         .where(
             ChatSession.visitor_uuid == visitor_uuid,
             ChatSession.tenant_id == tenant_id,
-                ChatSession.session_status.in_([SessionStatus.ACTIVE, SessionStatus.BOT, SessionStatus.HUMAN]),
             ChatSession.is_deleted == False
         )
         .order_by(ChatSession.created_at.desc())
@@ -760,22 +831,73 @@ def consolidate_visitor_sessions(db: Session, visitor_uuid: str, tenant_id: int)
     if not sessions:
         return None
     
-    # If we have multiple sessions, keep the most recent one and close the others
-    if len(sessions) > 1:
-        keep_session = sessions[0]  # Most recent
-        duplicate_sessions = sessions[1:]  # Older duplicates
-        
+    # Find the most recent session that has activity or is active
+    keep_session = None
+    for session in sessions:
+        if session.session_status in [SessionStatus.ACTIVE, SessionStatus.BOT, SessionStatus.HUMAN]:
+            keep_session = session
+            break
+    
+    # If no active session found, use the most recent one and reactivate it
+    if not keep_session:
+        keep_session = sessions[0]
+        keep_session.session_status = SessionStatus.ACTIVE
+        keep_session.current_mode = ConversationMode.BOT
+        keep_session.conversation_mode = ConversationMode.BOT
+        keep_session.is_locked = False
+        keep_session.agent_joined = False
+        keep_session.last_activity_at = datetime.utcnow()
+        keep_session.last_activity_utc = datetime.utcnow()
+    
+    # CRITICAL FIX: Merge lead information from all sessions
+    # This ensures that returning visitors are recognized as existing leads
+    lead_info_merged = False
+    for session in sessions:
+        if session.id != keep_session.id:
+            # Transfer lead information if the kept session doesn't have it but this session does
+            if not keep_session.lead_name and session.lead_name:
+                keep_session.lead_name = session.lead_name
+                lead_info_merged = True
+            if not keep_session.lead_email and session.lead_email:
+                keep_session.lead_email = session.lead_email
+                lead_info_merged = True
+            if not keep_session.lead_phone and session.lead_phone:
+                keep_session.lead_phone = session.lead_phone
+                lead_info_merged = True
+            if not keep_session.lead_company and session.lead_company:
+                keep_session.lead_company = session.lead_company
+                lead_info_merged = True
+            if not keep_session.lead_id and session.lead_id:
+                keep_session.lead_id = session.lead_id
+                lead_info_merged = True
+            if not keep_session.lead_score and session.lead_score:
+                keep_session.lead_score = session.lead_score
+                lead_info_merged = True
+            if not keep_session.lead_insights and session.lead_insights:
+                keep_session.lead_insights = session.lead_insights
+                lead_info_merged = True
+    
+    # Close all other sessions for this visitor
+    duplicate_sessions = [s for s in sessions if s.id != keep_session.id]
+    
+    if duplicate_sessions:
         logger.info(f"Consolidating sessions for visitor {visitor_uuid}. Keeping {keep_session.session_id}, closing {len(duplicate_sessions)} others.")
         
+        if lead_info_merged:
+            logger.info(f"Merged lead information for visitor {visitor_uuid}: name={keep_session.lead_name}, email={keep_session.lead_email}")
+        
         for duplicate in duplicate_sessions:
-            duplicate.session_status = 'ended'  # Raw string value matching DB column
+            duplicate.session_status = SessionStatus.CLOSED
+            duplicate.current_mode = ConversationMode.BOT
+            duplicate.conversation_mode = ConversationMode.BOT
+            duplicate.is_locked = False
+            duplicate.agent_joined = False
             duplicate.ended_at_utc = datetime.utcnow()
             duplicate.ended_at_local = datetime.utcnow()
         
         db.commit()
-        return keep_session
     
-    return sessions[0]
+    return keep_session
 
 
 @router.get("/history")
@@ -789,12 +911,45 @@ async def get_history(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
-    """Get paginated conversation history."""
+    """Get paginated conversation history with session consolidation by visitor."""
     tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
     logger.info(f"FETCH_HISTORY: tenant_id={tenant_id}, status_filter={status_filter}, date_from={date_from}, date_to={date_to}")
     
-    # Build base query — always filter by tenant and exclude soft-deleted sessions
-    conditions = [
+    # CRITICAL FIX: Consolidate sessions by visitor_uuid first
+    # This prevents multiple sessions for the same visitor from appearing in history
+    
+    # Step 1: Proactively consolidate any duplicate sessions before querying
+    from sqlalchemy import func, and_, select, distinct
+    
+    # Find visitors with multiple sessions
+    duplicate_visitors_stmt = (
+        select(ChatSession.visitor_uuid)
+        .where(
+            ChatSession.tenant_id == tenant_id,
+            ChatSession.is_deleted == False
+        )
+        .group_by(ChatSession.visitor_uuid)
+        .having(func.count(ChatSession.id) > 1)
+    )
+    
+    duplicate_visitors = db.execute(duplicate_visitors_stmt).scalars().all()
+    
+    # Consolidate each visitor's sessions
+    consolidated_count = 0
+    for visitor_uuid in duplicate_visitors:
+        consolidated_session = consolidate_visitor_sessions(db, visitor_uuid, tenant_id)
+        if consolidated_session:
+            consolidated_count += 1
+    
+    if consolidated_count > 0:
+        logger.info(f"FETCH_HISTORY: Consolidated {consolidated_count} duplicate visitor sessions")
+    
+    # Step 2: Get unique visitors with their most recent session
+    # Use a window function approach instead of complex joins
+    from sqlalchemy import text
+    
+    # Build base conditions
+    base_conditions = [
         ChatSession.tenant_id == tenant_id,
         ChatSession.is_deleted == False
     ]
@@ -802,50 +957,63 @@ async def get_history(
     # Status filter — handle both 'ALL' and 'all'
     if status_filter and status_filter.upper() != 'ALL':
         if status_filter.lower() == 'active':
-            conditions.append(ChatSession.session_status == 'active')
+            base_conditions.append(ChatSession.session_status == 'active')
         elif status_filter.lower() == 'ended':
-            conditions.append(ChatSession.session_status == 'ended')
+            base_conditions.append(ChatSession.session_status == 'ended')
     
     # Date filters
     if date_from:
         try:
             date_from_dt = datetime.fromisoformat(date_from.replace('Z', '+00:00'))
-            conditions.append(ChatSession.created_at >= date_from_dt)
+            base_conditions.append(ChatSession.created_at >= date_from_dt)
         except ValueError:
             pass
     
     if date_to:
         try:
             date_to_dt = datetime.fromisoformat(date_to.replace('Z', '+00:00'))
-            conditions.append(ChatSession.created_at <= date_to_dt)
+            base_conditions.append(ChatSession.created_at <= date_to_dt)
         except ValueError:
             pass
     
-    # Count total records
-    count_stmt = select(func.count(ChatSession.id))
-    if conditions:
-        count_stmt = count_stmt.where(and_(*conditions))
-    
-    total = db.execute(count_stmt).scalar()
-    logger.info(f"FETCH_HISTORY: Total record count found: {total}")
-    
-    # Get paginated results
-    stmt = (
+    # Get all sessions matching criteria, then deduplicate by visitor_uuid in Python
+    # This is simpler and more reliable than complex SQL joins
+    all_sessions_stmt = (
         select(ChatSession)
-        .order_by(ChatSession.last_activity_at.desc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
+        .where(and_(*base_conditions))
+        .order_by(ChatSession.visitor_uuid, ChatSession.last_activity_at.desc())
     )
     
-    if conditions:
-        stmt = stmt.where(and_(*conditions))
+    all_sessions = db.execute(all_sessions_stmt).scalars().all()
     
-    result = db.execute(stmt)
-    sessions = list(result.scalars().all())
+    # Deduplicate by visitor_uuid - keep only the most recent session per visitor
+    unique_sessions = {}
+    for session in all_sessions:
+        visitor_uuid = session.visitor_uuid
+        if visitor_uuid not in unique_sessions:
+            unique_sessions[visitor_uuid] = session
+        else:
+            # Keep the session with the most recent activity
+            if session.last_activity_at > unique_sessions[visitor_uuid].last_activity_at:
+                unique_sessions[visitor_uuid] = session
+    
+    # Convert to list and sort by last_activity_at descending
+    sessions_list = list(unique_sessions.values())
+    sessions_list.sort(key=lambda x: x.last_activity_at, reverse=True)
+    
+    total = len(sessions_list)
+    logger.info(f"FETCH_HISTORY: Total unique visitors found: {total}")
+    
+    # Apply pagination
+    start_idx = (page - 1) * page_size
+    end_idx = start_idx + page_size
+    paginated_sessions = sessions_list[start_idx:end_idx]
+    
+    logger.info(f"FETCH_HISTORY: Retrieved {len(paginated_sessions)} consolidated sessions")
     
     # Format sessions for frontend
     items = []
-    for session in sessions:
+    for session in paginated_sessions:
         items.append(format_session_for_crm(session))
     
     return {
@@ -936,6 +1104,199 @@ async def update_lead(
         pass
         
     return {"status": "success", "message": "Lead updated successfully"}
+
+
+@router.post("/test-message/{session_uuid}")
+async def test_message_to_client(
+    session_uuid: str,
+    message_data: Dict[str, Any],
+    db: Session = Depends(get_db)
+):
+    """Test endpoint to send a message directly to client WebSocket."""
+    
+    # Check if client is connected
+    from app.services.websocket_manager import manager
+    
+    # Try multiple variations of the session ID
+    session_variations = [
+        session_uuid,
+        session_uuid.lower(),
+        session_uuid.upper(),
+    ]
+    
+    client_found = False
+    target_sid = None
+    
+    for variation in session_variations:
+        if manager.has_client(variation):
+            client_found = True
+            target_sid = variation
+            break
+    
+    if not client_found:
+        return {
+            "success": False,
+            "error": "No client connected",
+            "session_uuid": session_uuid,
+            "tried_variations": session_variations,
+            "available_clients": list(manager._clients.keys()),
+            "available_agents": list(manager._agents.keys())
+        }
+    
+    # Send test message to client
+    test_message = message_data.get("message", "Test message from CRM")
+    
+    try:
+        await manager.send_to_client(target_sid, {
+            "type": "message",
+            "message": test_message,
+            "sender": "agent",
+            "purpose": "chatbot",
+            "msg_id": f"test_{int(datetime.utcnow().timestamp())}",
+            "message_status": "delivered",
+            "session_id": session_uuid,
+            "timestamp": datetime.utcnow().isoformat()
+        })
+        
+        return {
+            "success": True,
+            "message": "Test message sent successfully",
+            "target_session": target_sid,
+            "original_session": session_uuid
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Failed to send message: {str(e)}",
+            "target_session": target_sid
+        }
+async def debug_session(
+    session_uuid: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Debug endpoint to check session status and WebSocket connections."""
+    tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
+    
+    # Find the session
+    from sqlalchemy import select, and_
+    stmt = (
+        select(ChatSession)
+        .where(
+            and_(
+                (ChatSession.visitor_uuid == session_uuid) | (ChatSession.session_id == session_uuid),
+                ChatSession.is_deleted == False
+            )
+        )
+    )
+    result = db.execute(stmt)
+    session = result.scalar_one_or_none()
+    
+    if not session:
+        return {"error": "Session not found", "session_uuid": session_uuid}
+    
+    # Check WebSocket connections
+    from app.services.websocket_manager import manager
+    has_client = manager.has_client(session_uuid)
+    has_agent = manager.has_agent(session_uuid)
+    
+    # Also check with normalized (lowercase) UUID
+    normalized_uuid = session_uuid.lower()
+    has_client_normalized = manager.has_client(normalized_uuid)
+    has_agent_normalized = manager.has_agent(normalized_uuid)
+    
+    return {
+        "session_found": True,
+        "session_id": session.session_id,
+        "visitor_uuid": session.visitor_uuid,
+        "tenant_id": session.tenant_id,
+        "session_status": session.session_status,
+        "current_mode": session.current_mode,
+        "conversation_mode": session.conversation_mode,
+        "agent_joined": session.agent_joined,
+        "assigned_agent_id": session.assigned_agent_id,
+        "is_locked": session.is_locked,
+        "websocket_connections": {
+            "has_client_original": has_client,
+            "has_agent_original": has_agent,
+            "has_client_normalized": has_client_normalized,
+            "has_agent_normalized": has_agent_normalized,
+            "all_clients": list(manager._clients.keys()),
+            "all_agents": list(manager._agents.keys())
+        }
+    }
+
+
+@router.get("/debug/session/{session_uuid}")
+async def debug_session(
+    session_uuid: str,
+    db: Session = Depends(get_db)
+):
+    """Debug endpoint to check session status and WebSocket connections."""
+    # Find all sessions with this UUID (there might be duplicates)
+    from sqlalchemy import select
+    stmt = (
+        select(ChatSession)
+        .where(
+            (ChatSession.visitor_uuid == session_uuid) | (ChatSession.session_id == session_uuid),
+            ChatSession.is_deleted == False
+        )
+        .order_by(ChatSession.last_activity_at.desc())  # Get most recent first
+    )
+    result = db.execute(stmt)
+    sessions = list(result.scalars().all())
+    
+    if not sessions:
+        return {"error": "Session not found", "session_uuid": session_uuid}
+    
+    # Use the most recent session
+    session = sessions[0]
+    
+    # Check WebSocket connections
+    from app.services.websocket_manager import manager
+    has_client = manager.has_client(session_uuid)
+    has_agent = manager.has_agent(session_uuid)
+    
+    # Also check with normalized (lowercase) UUID
+    normalized_uuid = session_uuid.lower()
+    has_client_normalized = manager.has_client(normalized_uuid)
+    has_agent_normalized = manager.has_agent(normalized_uuid)
+    
+    return {
+        "session_found": True,
+        "total_sessions_found": len(sessions),
+        "using_most_recent": True,
+        "session_id": session.session_id,
+        "visitor_uuid": session.visitor_uuid,
+        "tenant_id": session.tenant_id,
+        "session_status": session.session_status,
+        "current_mode": session.current_mode,
+        "conversation_mode": session.conversation_mode,
+        "agent_joined": session.agent_joined,
+        "assigned_agent_id": session.assigned_agent_id,
+        "is_locked": session.is_locked,
+        "last_activity_at": session.last_activity_at.isoformat() if session.last_activity_at else None,
+        "websocket_connections": {
+            "has_client_original": has_client,
+            "has_agent_original": has_agent,
+            "has_client_normalized": has_client_normalized,
+            "has_agent_normalized": has_agent_normalized,
+            "all_clients": list(manager._clients.keys()),
+            "all_agents": list(manager._agents.keys())
+        },
+        "all_sessions": [
+            {
+                "session_id": s.session_id,
+                "visitor_uuid": s.visitor_uuid,
+                "session_status": s.session_status,
+                "current_mode": s.current_mode,
+                "last_activity_at": s.last_activity_at.isoformat() if s.last_activity_at else None,
+                "created_at": s.created_at.isoformat() if s.created_at else None
+            } for s in sessions
+        ]
+    }
 
 
 @router.get("/server-time")

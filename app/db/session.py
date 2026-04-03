@@ -44,14 +44,35 @@ engine = create_engine(
 def on_connect(dbapi_connection, connection_record):
     logger.info("Database: New physical connection established to SQL Server.")
     
-    # ⚡ FIX: Render Emojis from SQL Server NVARCHAR Correctly
+    # ⚡ FIX: Handle Mixed Encoding from SQL Server NVARCHAR
     try:
         import pyodbc
         if isinstance(dbapi_connection, pyodbc.Connection):
-            # Tell pyodbc to handle Unicode / Emojis via raw utf-16le converters
-            dbapi_connection.add_output_converter(pyodbc.SQL_WVARCHAR, lambda x: x.decode('utf-16le') if x is not None else None)
-            dbapi_connection.add_output_converter(pyodbc.SQL_WCHAR, lambda x: x.decode('utf-16le') if x is not None else None)
-            dbapi_connection.add_output_converter(pyodbc.SQL_WLONGVARCHAR, lambda x: x.decode('utf-16le') if x is not None else None)
+            # SQL Server stores Unicode properly, but we need to handle legacy data
+            # that might have been stored with different encodings
+            def safe_decode_converter(value):
+                if value is None:
+                    return None
+                if isinstance(value, str):
+                    return value  # Already decoded
+                if isinstance(value, bytes):
+                    # Try UTF-8 first, then fallback to Windows-1252, then Latin-1
+                    for encoding in ['utf-8', 'cp1252', 'latin-1']:
+                        try:
+                            return value.decode(encoding)
+                        except UnicodeDecodeError:
+                            continue
+                    # If all fail, use error handling
+                    return value.decode('utf-8', errors='replace')
+                return str(value)
+            
+            # Apply safe converter to text fields
+            dbapi_connection.add_output_converter(pyodbc.SQL_WVARCHAR, safe_decode_converter)
+            dbapi_connection.add_output_converter(pyodbc.SQL_WCHAR, safe_decode_converter)
+            dbapi_connection.add_output_converter(pyodbc.SQL_WLONGVARCHAR, safe_decode_converter)
+            dbapi_connection.add_output_converter(pyodbc.SQL_VARCHAR, safe_decode_converter)
+            dbapi_connection.add_output_converter(pyodbc.SQL_CHAR, safe_decode_converter)
+            dbapi_connection.add_output_converter(pyodbc.SQL_LONGVARCHAR, safe_decode_converter)
     except ImportError:
         pass # pyodbc not installed/used
     except Exception as e:

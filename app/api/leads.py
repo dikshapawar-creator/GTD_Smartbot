@@ -124,6 +124,12 @@ async def submit_lead(
 
         # 3. Update session if exists (link lead to session)
         if chat_session:
+            # CRITICAL FIX: Consolidate any duplicate sessions for this visitor first
+            from app.api.live_chat import consolidate_visitor_sessions
+            consolidated_session = consolidate_visitor_sessions(db, chat_session.visitor_uuid, current_tenant_id)
+            if consolidated_session:
+                chat_session = consolidated_session  # Use the consolidated session
+            
             # Update session with lead information
             chat_session.lead_id = str(lead.id)
             chat_session.lead_name = lead_req.full_name

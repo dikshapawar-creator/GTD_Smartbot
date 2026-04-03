@@ -195,7 +195,10 @@ def create_app() -> FastAPI:
                         request.url.path.startswith("/static") or \
                         request.url.path.startswith("/docs") or \
                         request.url.path.startswith("/openapi.json") or \
-                        request.url.path.startswith("/redoc")
+                        request.url.path.startswith("/redoc") or \
+                        request.url.path.startswith("/live-chat/debug") or \
+                        request.url.path.startswith("/live-chat/test-message") or \
+                        "/test-message/" in request.url.path  # Additional check for test endpoints
             
             if not tenant_id and not is_exempt:
                 logger.error(f"SECURITY BLOCK: No tenant identified for {request.url.path}")

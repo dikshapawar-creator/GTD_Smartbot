@@ -410,8 +410,11 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
                 "session_id": str(active_session.visitor_uuid),
                 "message": user_message,
                 "sender": "user",
+                "message_type": "user",
+                "purpose": "crm_updates",  # ← CRITICAL: Use crm_updates purpose
                 "timestamp": datetime.utcnow().isoformat(),
-                "msg_id": f"rest_user_{datetime.utcnow().timestamp()}"
+                "msg_id": f"rest_user_{datetime.utcnow().timestamp()}",
+                "created_at_ist": datetime.now(timezone.utc).strftime('%d %b, %I:%M %p')
             },
             tenant_id=active_session.tenant_id
         )
@@ -421,8 +424,11 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
                 "session_id": str(active_session.visitor_uuid),
                 "message": bot_message,
                 "sender": "bot",
+                "message_type": "bot",
+                "purpose": "crm_updates",  # ← CRITICAL: Use crm_updates purpose
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "msg_id": f"rest_bot_{datetime.now(timezone.utc).timestamp()}"
+                "msg_id": f"rest_bot_{datetime.now(timezone.utc).timestamp()}",
+                "created_at_ist": datetime.now(timezone.utc).strftime('%d %b, %I:%M %p')
             },
             tenant_id=active_session.tenant_id
         )

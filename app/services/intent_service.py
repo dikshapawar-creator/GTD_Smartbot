@@ -87,30 +87,48 @@ def detect_intent(db: Session, message: str, tenant_id: int) -> str:
                 if not keywords: continue
                 
                 # Robust parsing: handle JSON-list strings OR comma-separated strings
-                if isinstance(keywords, str):
-                    keywords_str = keywords.strip()
-                    if keywords_str.startswith("[") and keywords_str.endswith("]"):
-                        try:
-                            keywords = json.loads(keywords_str)
-                        except:
+                try:
+                    if isinstance(keywords, str):
+                        keywords_str = keywords.strip()
+                        
+                        # Handle UTF-16 encoded strings with null bytes
+                        if '\x00' in keywords_str:
+                            try:
+                                # Try to decode from UTF-16
+                                keywords_str = keywords_str.encode('latin1').decode('utf-16le').rstrip('\x00')
+                            except:
+                                # Fallback: just remove null bytes
+                                keywords_str = keywords_str.replace('\x00', '')
+                        
+                        if keywords_str.startswith("[") and keywords_str.endswith("]"):
+                            try:
+                                keywords = json.loads(keywords_str)
+                            except json.JSONDecodeError as e:
+                                logger.warning(f"Invalid JSON for intent {config.intent_key} tenant {target_id}: {e}")
+                                # Try to parse as comma-separated values inside brackets
+                                inner = keywords_str.strip("[]")
+                                keywords = [k.strip().strip('"').strip("'") for k in inner.split(",") if k.strip()]
+                        else:
                             keywords = [k.strip() for k in keywords_str.split(",")]
-                    else:
-                        keywords = [k.strip() for k in keywords_str.split(",")]
-                
-                if not isinstance(keywords, list):
-                    continue
-
-                for kw in keywords:
-                    kw = kw.lower().strip()
-                    if not kw: continue
                     
-                    # ⚡ Use word boundary matching for more accurate detection
-                    # This prevents "buy" matching "building"
-                    pattern = rf"\b{re.escape(kw)}\b"
-                    if re.search(pattern, message, re.IGNORECASE) and len(kw) > max_len:
-                        max_len = len(kw)
-                        match = config.intent_key
-                        logger.debug(f"Matched keyword '{kw}' for intent '{match}'")
+                    if not isinstance(keywords, list):
+                        continue
+
+                    for kw in keywords:
+                        kw = kw.lower().strip().strip('"').strip("'")
+                        if not kw: continue
+                        
+                        # ⚡ Use word boundary matching for more accurate detection
+                        # This prevents "buy" matching "building"
+                        pattern = rf"\b{re.escape(kw)}\b"
+                        if re.search(pattern, message, re.IGNORECASE) and len(kw) > max_len:
+                            max_len = len(kw)
+                            match = config.intent_key
+                            logger.debug(f"Matched keyword '{kw}' for intent '{match}'")
+                except Exception as e:
+                    logger.warning(f"Error processing keywords for intent {config.intent_key}: {e}")
+                    continue
+                    
             return match, max_len
         except Exception as e:
             logger.error(f"Error querying IntentConfig for tenant {target_id}: {e}")

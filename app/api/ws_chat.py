@@ -216,39 +216,71 @@ async def websocket_chat(
     Bidirectional WebSocket for live chat.
     SECURITY: Enforces tenant isolation and role-gated access.
     """
-    await websocket.accept()
+    logger.info(f"🔌 WebSocket connection attempt: session_id={session_id}, role={role}, tenant_id={tenant_id}")
+    
+    try:
+        await websocket.accept()
+        logger.info(f"✅ WebSocket accepted for session {session_id} ({role})")
+    except Exception as e:
+        logger.error(f"❌ Failed to accept WebSocket for session {session_id}: {e}")
+        return
+    
     db = _get_db_session()
     user_tenant_id = None
 
     try:
         # ── Role-based authentication ────────────────────────────────────
         if role == "client":
+            logger.info(f"🔵 [WS_CLIENT] Client WebSocket connection attempt: session_id={session_id}")
             # Client must provide matching session_id as token
             if token != session_id:
+                logger.error(f"❌ [WS_CLIENT] Token mismatch: token={token}, session_id={session_id}")
                 await websocket.close(code=4001, reason="Invalid client token")
                 return
             
             # Fetch session to get tenant_id for later message persists
+            # Be permissive with session status to allow client connections, but prefer active sessions
             chat_session = (
                 db.query(ChatSession)
                 .filter(
                     (ChatSession.visitor_uuid == session_id) | (ChatSession.session_id == session_id),
-                    ChatSession.session_status.in_([SessionStatus.ACTIVE, SessionStatus.BOT, SessionStatus.HUMAN]),
                     ChatSession.is_deleted == False
+                )
+                .order_by(
+                    # Use CASE statement for SQL Server compatibility
+                    ChatSession.last_activity_at.desc()
                 )
                 .first()
             )
+            
             if not chat_session:
+                logger.error(f"❌ [WS_CLIENT] Session {session_id} not found or inactive")
+                # Try to find the session with any status to debug
+                any_session = db.query(ChatSession).filter(
+                    (ChatSession.visitor_uuid == session_id) | (ChatSession.session_id == session_id),
+                    ChatSession.is_deleted == False
+                ).first()
+                if any_session:
+                    logger.info(f"🔍 [WS_CLIENT] Found session with status: {any_session.session_status}, mode: {any_session.current_mode}")
+                else:
+                    logger.error(f"🔍 [WS_CLIENT] No session found at all for {session_id}")
                 await websocket.close(code=4004, reason="Session not found or inactive")
                 return
             
             user_tenant_id = chat_session.tenant_id
+            logger.info(f"✅ [WS_CLIENT] About to register client for session {session_id} (tenant: {user_tenant_id})")
             await manager.connect_client(session_id, websocket)
+            logger.info(f"✅ [WS_CLIENT] Client successfully registered for session {session_id}")
+            
+            # Verify registration
+            logger.info(f"🔍 [WS_CLIENT] Post-registration check: has_client={manager.has_client(session_id)}")
+            logger.info(f"🔍 [WS_CLIENT] All registered clients: {list(manager._clients.keys())}")
             
             # ⏰ INACTIVITY: Start monitor on connection
             asyncio.create_task(send_inactivity_message(session_id, chat_session.last_activity_utc))
 
         elif role == "agent":
+            logger.info(f"🔑 Agent WebSocket connection attempt: session_id={session_id}, tenant_id={tenant_id}")
             # ── Secure JWT Validation for Agent ──
             try:
                 payload = jwt.decode(
@@ -288,14 +320,48 @@ async def websocket_chat(
 
             # Verify session exists and determine correct tenant context
             logger.info(f"🔍 Looking for session {session_id} in tenant {user_tenant_id}")
+            logger.info(f"🔍 Agent details: id={agent_id}, tenant_id={agent.tenant_id}, is_super_admin={agent.is_super_admin}")
+            
+            # CRITICAL FIX: Find the most recent session that can be activated (not just active ones)
+            # Allow agents to connect to CLOSED sessions to reopen them
             chat_session = (
                 db.query(ChatSession)
                 .filter(
                     (ChatSession.visitor_uuid == session_id) | (ChatSession.session_id == session_id),
-                    ChatSession.is_deleted == False
+                    ChatSession.is_deleted == False,
+                    ChatSession.session_status.in_(['active', 'ACTIVE', 'closed', 'CLOSED', 'bot', 'BOT'])  # Allow reactivation
                 )
+                .order_by(ChatSession.last_activity_at.desc())  # Most recent first
                 .first()
             )
+            
+            if chat_session:
+                logger.info(f"✅ Session found: session_id={chat_session.session_id}, visitor_uuid={chat_session.visitor_uuid}, tenant_id={chat_session.tenant_id}, status={chat_session.session_status}")
+                
+                # CRITICAL FIX: Reactivate closed sessions when agent connects
+                if chat_session.session_status in ['closed', 'CLOSED']:
+                    logger.info(f"🔄 Reactivating closed session {session_id}")
+                    chat_session.session_status = SessionStatus.ACTIVE
+                    chat_session.is_locked = True
+                    chat_session.agent_joined = True
+                    chat_session.last_activity_at = datetime.now(timezone.utc)
+                    chat_session.last_activity_utc = datetime.now(timezone.utc)
+                    db.commit()
+                    logger.info(f"✅ Session {session_id} reactivated successfully")
+            else:
+                logger.error(f"❌ No active session found for {session_id}")
+                # Try to find any session with similar UUID to debug
+                any_session = db.query(ChatSession).filter(
+                    (ChatSession.visitor_uuid == session_id) | (ChatSession.session_id == session_id),
+                    ChatSession.is_deleted == False
+                ).order_by(ChatSession.last_activity_at.desc()).first()
+                if any_session:
+                    logger.info(f"🔍 Found session with status: {any_session.session_status}, mode: {any_session.current_mode}")
+                    # If it's a closed session, suggest reactivation
+                    if any_session.session_status in ['closed', 'CLOSED']:
+                        logger.info(f"💡 Session {session_id} is closed but can be reactivated by agent connection")
+                else:
+                    logger.error(f"🔍 No session found at all for {session_id}")
             
             if not chat_session:
                 logger.error(f"❌ Session {session_id} not found in any tenant")
@@ -305,7 +371,7 @@ async def websocket_chat(
             # CRITICAL FIX: For super admin, always allow access to any tenant's session
             if chat_session.tenant_id != user_tenant_id:
                 if agent.is_super_admin:
-                    logger.info(f"🔑 Super admin access granted to session in tenant {chat_session.tenant_id}")
+                    logger.info(f"🔑 Super admin {agent_id} accessing session {session_id} in tenant {chat_session.tenant_id} (agent's context: {user_tenant_id})")
                     user_tenant_id = chat_session.tenant_id  # Update tenant context to match session
                 else:
                     logger.error(f"❌ Session {session_id} found in tenant {chat_session.tenant_id}, but agent is in tenant {user_tenant_id}")
@@ -329,20 +395,49 @@ async def websocket_chat(
 
             # Verify this agent is actually handling the session (if assigned)
             if chat_session.assigned_agent_id and chat_session.assigned_agent_id != agent_id:
-                await websocket.close(code=4003, reason="Another agent is handling this session")
-                return
+                # Allow super admin to take over any session
+                if not agent.is_super_admin:
+                    await websocket.close(code=4003, reason="Another agent is handling this session")
+                    return
+                else:
+                    # Super admin can take over - update assignment
+                    logger.info(f"🔑 Super admin {agent_id} taking over session from agent {chat_session.assigned_agent_id}")
+                    chat_session.assigned_agent_id = agent_id
+                    chat_session.assigned_agent_email = agent.email
+                    chat_session.assigned_agent_name = agent.full_name
+                    chat_session.agent_name = agent.full_name
+                    db.commit()
 
             # Register with both managers
             await manager.connect_agent(session_id, websocket)
             from app.core.socket_manager import socket_manager
             await socket_manager.connect(websocket, agent_id, user_tenant_id)
+            logger.info(f"✅ [WS_AGENT] Successfully registered agent {agent_id} for session {session_id} in tenant {user_tenant_id}")
+            
+            # Verify registration
+            logger.info(f"🔍 [WS_AGENT] Post-registration check: has_agent={manager.has_agent(session_id)}")
+            logger.info(f"🔍 [WS_AGENT] All registered agents: {list(manager._agents.keys())}")
 
         else:
             await websocket.close(code=4000, reason="Invalid role specified")
             return
 
         # ── Message Loop ─────────────────────────────────────────────────
-        logger.info(f"➡️ [WS] Entered persistent loop for session {session_id} ({role})")
+        logger.info(f"➡️ [WS] Entered persistent loop for session {session_id} ({role}) - agent_id: {agent_id if role == 'agent' else 'N/A'}, tenant: {user_tenant_id}")
+        
+        # Send initial connection confirmation
+        try:
+            await websocket.send_json({
+                "type": "connection_established",
+                "session_id": session_id,
+                "role": role,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            })
+            logger.info(f"✅ [WS] Sent connection confirmation for {session_id} ({role})")
+        except Exception as e:
+            logger.error(f"❌ [WS] Failed to send connection confirmation: {e}")
+            return
+        
         while True:
             try:
                 # Use receive_text and parse manually for better error visibility
@@ -506,18 +601,23 @@ async def websocket_chat(
 
                     # 🔧 ENHANCED LOGGING: Debug message routing
                     logger.info(f"[WS_AGENT] Attempting to send message to client for session: {session_id}")
+                    logger.info(f"[WS_AGENT] Message text: {text[:50]}...")
+                    logger.info(f"[WS_AGENT] Available clients: {list(manager._clients.keys())}")
+                    logger.info(f"[WS_AGENT] Available agents: {list(manager._agents.keys())}")
                     
-                    normalized_sid = session_id.lower()
-                    if manager.has_client(normalized_sid):
-                        logger.info(f"[WS_AGENT] Client found for session {normalized_sid}, sending message")
-                        await manager.send_to_client(normalized_sid, {
+                    # Send message to client using improved manager
+                    try:
+                        await manager.send_to_client(session_id, {
                             "type": "message",
                             "message": text,
                             "sender": "agent",
                             "purpose": "chatbot",  # ← Required for Chatbot Widget routing
                             "msg_id": saved_msg.id if saved_msg else None,
-                            "message_status": "delivered"
+                            "message_status": "delivered",
+                            "session_id": session_id,
+                            "timestamp": datetime.now(timezone.utc).isoformat()
                         })
+                        logger.info(f"✅ [WS_AGENT] Message successfully sent to client for session {session_id}")
                         
                         # Update message status to delivered
                         if saved_msg:
@@ -532,8 +632,15 @@ async def websocket_chat(
                                 },
                                 tenant_id=user_tenant_id
                             )
-                    else:
-                        logger.warning(f"[WS_AGENT] No client connected for session {normalized_sid}")
+                    except Exception as send_error:
+                        logger.error(f"❌ [WS_AGENT] Failed to send message to client: {send_error}")
+                        
+                        # Save the message anyway so it appears in chat history
+                        if saved_msg:
+                            logger.info(f"[WS_AGENT] Message saved to database with ID: {saved_msg.id}")
+                        
+                        # The message will be visible when client refreshes or reconnects
+                        logger.info(f"[WS_AGENT] Message will be available via REST API when client reconnects")
 
                 # ── Handle Message Read Receipt ──────────────────────────
                 elif msg_type == "message_read":
@@ -572,6 +679,10 @@ async def websocket_chat(
                 # Catch closed socket state errors to break the loop safely
                 logger.error(f"⚠️ [WS] Fatal socket state error for {session_id}: {e}")
                 break
+            except Exception as e:
+                # Log other exceptions but don't break the loop
+                logger.error(f"⚠️ [WS] Non-fatal error in message loop for {session_id}: {e}", exc_info=True)
+                # Continue the loop instead of breaking
 
     except WebSocketDisconnect:
         logger.info(f"🔴 [WS] Client disconnected: {session_id} ({role})")

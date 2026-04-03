@@ -41,19 +41,30 @@ def get_all_tenants(
 def get_dashboard_stats(
     target_tenant_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(2))
+    current_user: User = Depends(require_role(1))  # ← FIXED: Allow sales role (1) to access stats
 ):
     """
     Enterprise Dashboard Analytics: Represents real business data.
+    Now accessible to Sales role (1) and above.
     """
     is_super = getattr(current_user, 'is_super_admin', False)
     
     # 🚨 SECURITY: Prevent non-super admins from looking into other tenants
     if target_tenant_id and not is_super:
         # Check if they have specific access via user_tenants mapping if not super admin
-        allowed_ids = [ut.tenant_id for ut in current_user.user_tenants]
-        if target_tenant_id not in allowed_ids:
-            target_tenant_id = None # Silently fallback to primary if unauthorized
+        from app.models.auth import UserTenant
+        user_tenant_access = db.query(UserTenant).filter(
+            UserTenant.user_id == current_user.id,
+            UserTenant.tenant_id == target_tenant_id,
+            UserTenant.status == True
+        ).first()
+        
+        if not user_tenant_access:
+            # For sales role, restrict to their primary tenant only
+            if current_user.role.level == 1:  # Sales role
+                target_tenant_id = current_user.tenant_id
+            else:
+                target_tenant_id = None  # Fallback to primary if unauthorized
 
     tenant_id = target_tenant_id if target_tenant_id else current_user.tenant_id
     
