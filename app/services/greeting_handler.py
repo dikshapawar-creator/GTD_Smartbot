@@ -13,12 +13,16 @@ def handle_greeting(db: Session, chat_session: ChatSession) -> dict:
     """
     Handles a greeting message using the template stored in intent_configs.
     """
-    # Fetch response from DB
+    # Fetch response from DB with error handling for JSON decode issues
     # Force professional greeting (pinned to Smart Chatbot / Tenant 1 flow)
-    config = db.query(IntentConfig).filter(
-        IntentConfig.intent_key == "GREETING",
-        IntentConfig.tenant_id == chat_session.tenant_id
-    ).first()
+    try:
+        config = db.query(IntentConfig).filter(
+            IntentConfig.intent_key == "GREETING",
+            IntentConfig.tenant_id == chat_session.tenant_id
+        ).first()
+    except Exception as e:
+        logger.error(f"Error fetching greeting config for tenant {chat_session.tenant_id}: {e}")
+        config = None
 
     # Fallback to generic if still not in DB
     response_text = config.response_text if (config and config.response_text) else "Hello! How can I help you today?"

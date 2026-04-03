@@ -675,6 +675,10 @@ async def websocket_chat(
                             )
                     continue
 
+            except WebSocketDisconnect as e:
+                # WebSocket disconnected - this should break the loop
+                logger.info(f"🔴 [WS] WebSocket disconnected in loop for {session_id}: {e}")
+                break
             except (RuntimeError, ValueError) as e:
                 # Catch closed socket state errors to break the loop safely
                 logger.error(f"⚠️ [WS] Fatal socket state error for {session_id}: {e}")

@@ -72,10 +72,15 @@ def detect_intent(db: Session, message: str, tenant_id: int) -> str:
             if target_id in intent_cache and intent_cache[target_id]["expiry"] > now:
                 configs = intent_cache[target_id]["data"]
             else:
-                configs = db.query(IntentConfig).filter(
-                    IntentConfig.tenant_id == target_id,
-                    IntentConfig.is_active == True
-                ).all()
+                try:
+                    configs = db.query(IntentConfig).filter(
+                        IntentConfig.tenant_id == target_id,
+                        IntentConfig.is_active == True
+                    ).all()
+                except Exception as db_error:
+                    logger.error(f"Database error querying IntentConfig for tenant {target_id}: {db_error}")
+                    return None, 0
+                    
                 intent_cache[target_id] = {"data": configs, "expiry": now + CACHE_TTL}
                 logger.debug(f"Intent cache refreshed for tenant {target_id}")
 
@@ -83,13 +88,17 @@ def detect_intent(db: Session, message: str, tenant_id: int) -> str:
             max_len = 0
             import json
             for config in configs:
-                keywords = config.keywords
-                if not keywords: continue
-                
-                # Robust parsing: handle JSON-list strings OR comma-separated strings
                 try:
+                    keywords = config.keywords
+                    if not keywords: continue
+                    
+                    # Parse keywords from string (now that we store as TEXT, not JSON)
                     if isinstance(keywords, str):
                         keywords_str = keywords.strip()
+                        
+                        # Skip empty strings
+                        if not keywords_str:
+                            continue
                         
                         # Handle UTF-16 encoded strings with null bytes
                         if '\x00' in keywords_str:
@@ -100,6 +109,7 @@ def detect_intent(db: Session, message: str, tenant_id: int) -> str:
                                 # Fallback: just remove null bytes
                                 keywords_str = keywords_str.replace('\x00', '')
                         
+                        # Try to parse as JSON first
                         if keywords_str.startswith("[") and keywords_str.endswith("]"):
                             try:
                                 keywords = json.loads(keywords_str)
@@ -109,7 +119,8 @@ def detect_intent(db: Session, message: str, tenant_id: int) -> str:
                                 inner = keywords_str.strip("[]")
                                 keywords = [k.strip().strip('"').strip("'") for k in inner.split(",") if k.strip()]
                         else:
-                            keywords = [k.strip() for k in keywords_str.split(",")]
+                            # Treat as comma-separated string
+                            keywords = [k.strip().strip('"').strip("'") for k in keywords_str.split(",") if k.strip()]
                     
                     if not isinstance(keywords, list):
                         continue
