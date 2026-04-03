@@ -216,7 +216,9 @@ We’ll be happy to assist you with complete support.""",
         fallback_msg = ChatbotService._get_dynamic_response(
             db, 
             "FALLBACK_GENERIC", 
-            "Thank you for reaching out. A representative will be with you shortly to assist you further.",
+            """Thankyou, We will arrange a call for you shortly. 
+You can discuss all your questions with our team during the meeting. 
+Regarding your data etc..., Our team provide you appropriate solution.""",
             chat_session.tenant_id
         )
         
