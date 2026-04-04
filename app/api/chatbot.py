@@ -516,7 +516,10 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
             "message": bot_msg,
             "state": str(active_session.chat_state or "START").replace("ChatState.", "").replace("CHATSTATE.", "").upper() if active_session.chat_state != "GREETING" else "START",
             "type": ResponseType.CTA,
-            "ctas": [{"label": "Book Demo", "action": "OPEN_LEAD_FORM", "icon": "🚀", "type": "primary"}],
+            "ctas": [
+                {"label": "Book Demo", "action": "OPEN_LEAD_FORM", "icon": "🚀", "type": "primary"},
+                {"label": "Connect with Data Expert", "action": "HANDOFF", "icon": "💬", "type": "secondary"}
+            ],
             "conversation_status": active_session.conversation_mode,
             "server_time_utc": datetime.now(timezone.utc)
         })
@@ -528,8 +531,10 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
         "message": "How can I assist you today?",
         "state": str(active_session.chat_state or "START").replace("ChatState.", "").replace("CHATSTATE.", "").upper() if active_session.chat_state != "GREETING" else "START",
         "type": ResponseType.CTA,
-        "cta_label": "Book Demo", 
-        "action": "OPEN_LEAD_FORM",
+        "ctas": [
+            {"label": "Book Demo", "action": "OPEN_LEAD_FORM", "icon": "🚀", "type": "primary"},
+            {"label": "Connect with Data Expert", "action": "HANDOFF", "icon": "💬", "type": "secondary"}
+        ],
         "conversation_status": active_session.conversation_mode,
         "server_time_utc": datetime.utcnow()
     }

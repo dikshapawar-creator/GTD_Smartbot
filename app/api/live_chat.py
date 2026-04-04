@@ -184,15 +184,12 @@ async def get_messages(
     """Get messages for a specific session, including consolidated history."""
     tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
     
-    # CRITICAL FIX: Consolidate sessions for this visitor first
-    consolidated_session = consolidate_visitor_sessions(db, session_uuid, tenant_id)
-    
-    # Find the most recent session by visitor UUID (active or ended)
+    # Find the most recent session by visitor UUID or session ID
     stmt = (
         select(ChatSession)
         .where(
             and_(
-                ChatSession.visitor_uuid == session_uuid,
+                (ChatSession.visitor_uuid == session_uuid) | (ChatSession.session_id == session_uuid),
                 ChatSession.tenant_id == tenant_id,
                 ChatSession.is_deleted == False  # Include any non-deleted session for message history
             )
@@ -205,6 +202,9 @@ async def get_messages(
     
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+        
+    # CRITICAL FIX: Consolidate sessions for this visitor first, but do NOT reactivate if closed
+    consolidated_session = consolidate_visitor_sessions(db, session.visitor_uuid, tenant_id, reactivate_closed=False)
     
     # Get messages for ALL sessions belonging to this visitor or lead
     # This unified view helps agents see the full context of returning visitors
@@ -851,7 +851,7 @@ async def cleanup_empty_sessions_endpoint(
         raise HTTPException(status_code=500, detail=f"Cleanup failed: {str(e)}")
 
 
-def consolidate_visitor_sessions(db: Session, visitor_uuid: str, tenant_id: int) -> Optional[ChatSession]:
+def consolidate_visitor_sessions(db: Session, visitor_uuid: str, tenant_id: int, reactivate_closed: bool = True) -> Optional[ChatSession]:
     """
     Consolidate duplicate sessions for a visitor and return the most recent active session.
     This prevents duplicate queue cards in the live chat dashboard.
@@ -883,17 +883,18 @@ def consolidate_visitor_sessions(db: Session, visitor_uuid: str, tenant_id: int)
             keep_session = session
             break
     
-    # If no active session found, use the most recent one and reactivate it
+    # If no active session found, use the most recent one
     if not keep_session:
         keep_session = sessions[0]
-        keep_session.session_status = SessionStatus.ACTIVE
-        keep_session.current_mode = ConversationMode.BOT
-        keep_session.conversation_mode = ConversationMode.BOT
-        keep_session.is_locked = False
-        keep_session.agent_joined = False
-        keep_session.spam_flag = False  # Ensure returning unblocked users aren't still flagged as spam
-        keep_session.last_activity_at = datetime.utcnow()
-        keep_session.last_activity_utc = datetime.utcnow()
+        if reactivate_closed:
+            keep_session.session_status = SessionStatus.ACTIVE
+            keep_session.current_mode = ConversationMode.BOT
+            keep_session.conversation_mode = ConversationMode.BOT
+            keep_session.is_locked = False
+            keep_session.agent_joined = False
+            keep_session.spam_flag = False  # Ensure returning unblocked users aren't still flagged as spam
+            keep_session.last_activity_at = datetime.utcnow()
+            keep_session.last_activity_utc = datetime.utcnow()
     
     # CRITICAL FIX: Merge lead information from all sessions
     # This ensures that returning visitors are recognized as existing leads
@@ -983,7 +984,7 @@ async def get_history(
     # Consolidate each visitor's sessions
     consolidated_count = 0
     for visitor_uuid in duplicate_visitors:
-        consolidated_session = consolidate_visitor_sessions(db, visitor_uuid, tenant_id)
+        consolidated_session = consolidate_visitor_sessions(db, visitor_uuid, tenant_id, reactivate_closed=False)
         if consolidated_session:
             consolidated_count += 1
     
