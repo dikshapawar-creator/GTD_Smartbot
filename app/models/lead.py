@@ -30,6 +30,9 @@ class LeadStatus(str, enum.Enum):
     COMPLETE = "COMPLETE"
     DEAD_LEAD = "DEAD_LEAD"
     WRONG_LEAD = "WRONG_LEAD"
+    COLD = "COLD"
+    WARM = "WARM"
+    HOT = "HOT"
 
 
 class Lead(Base):

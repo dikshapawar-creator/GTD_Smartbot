@@ -1,10 +1,11 @@
 import logging
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
 from sqlalchemy import select, and_, or_, func, text
 from app.core.tenant_resolver import TenantResolver
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
 
 from app.db.session import get_db
 from app.services.live_chat_socket import get_live_chat_socket
@@ -64,46 +65,9 @@ async def get_conversations(
     from app.services.websocket_manager import manager
     
     for session in sessions:
-        # Get IP metadata safely
-        ip_meta = session.ip_metadata_dict
-        
-        conversations.append({
-            "session_id": session.id,
-            "session_uuid": session.visitor_uuid,
-            "session_status": session.session_status,
-            "current_mode": session.current_mode,
-            "agent_name": session.agent_name,
-            "assigned_agent_id": session.assigned_agent_id,
-            "assigned_agent_email": session.assigned_agent_email,
-            "assigned_agent_name": session.assigned_agent_name,
-            "agent_joined_at": session.agent_joined_at.isoformat() if session.agent_joined_at else None,
-            "is_locked": session.is_locked,
-            "is_online": manager.has_client(session.visitor_uuid),
-            "lead_name": session.lead_name or f"Visitor #{session.visitor_uuid[-6:].upper()}",
-            "lead_company": session.lead_company,
-            "lead_email": session.lead_email,
-            "lead_phone": session.lead_phone,
-            "lead_score": session.lead_score or 0,
-            "lead_status": _get_lead_status(session.lead_score or 0),
-            "spam_flag": session.spam_flag or False,
-            "last_message_at": session.last_activity_at.isoformat() if session.last_activity_at else None,
-            "message_count": session.message_count or 0,
-            "created_at": session.created_at.isoformat() if session.created_at else None,
-            "repeat_visitor": False,
-            "previous_session_count": 0,
-            "initial_ip": ip_meta.get("ip") or session.initial_ip,
-            "country": session.country,
-            "city": session.city,
-            "browser": ip_meta.get("browser") or session.browser or "Unknown",
-            "os": ip_meta.get("os") or session.os or "Unknown",
-            "device_type": ip_meta.get("device_type") or session.device_type or "desktop",
-            "created_at_ist": format_ist_datetime(session.created_at),
-            "last_message_ist": format_ist_datetime(session.last_activity_at),
-            "server_time_utc": datetime.utcnow().isoformat(),  # For time sync
-        })
+        conversations.append(format_session_for_crm(session))
     
     return conversations
-
 
 @router.get("/session-details/{session_uuid}")
 async def get_session_details(
@@ -137,13 +101,8 @@ async def get_session_details(
         if session.tenant_id != tenant_id:
             raise HTTPException(status_code=403, detail="Access denied")
     
-    return {
-        "session_id": session.session_id,
-        "visitor_uuid": session.visitor_uuid,
-        "tenant_id": session.tenant_id,
-        "session_status": session.session_status,
-        "current_mode": session.current_mode
-    }
+    # Return full formatted session for consistency
+    return format_session_for_crm(session)
 
 
 @router.get("/analytics")
@@ -405,7 +364,18 @@ async def intervene_session(
     try:
         socket_manager = get_live_chat_socket()
         if socket_manager:
+            # Notify CRM
             await socket_manager.notify_session_updated(session, session.tenant_id)
+            
+            # 🔥 ALSO notify Leads Table for real-time sync across pages
+            await socket_manager.broadcast_event(
+                "LEAD_UPDATED",
+                {
+                    "id": session.lead_id,
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                },
+                tenant_id=session.tenant_id
+            )
             
         # Also broadcast agent takeover with message history
         from app.core.socket_manager import socket_manager as ws_manager
@@ -758,8 +728,13 @@ def format_session_for_crm(session: ChatSession) -> dict:
         "lead_company": getattr(session.lead, 'company', None) or session.lead_company,
         "lead_email": getattr(session.lead, 'email', None) or session.lead_email,
         "lead_phone": getattr(session.lead, 'phone', None) or session.lead_phone,
+        "trade_type": getattr(session.lead, 'trade_type', None),
+        "country_interested": getattr(session.lead, 'country_interested', None),
+        "product": getattr(session.lead, 'product', None),
+        "requirement_type": getattr(session.lead, 'requirement_type', None),
+        "website": getattr(session.lead, 'website', None),
         "lead_score": session.lead_score or 0,
-        "lead_status": _get_lead_status(session.lead_score or 0),
+        "lead_status": getattr(session.lead, 'status', None) or _get_lead_status(session.lead_score or 0),
         "spam_flag": session.spam_flag or False,
         "last_message_at": session.last_activity_at.isoformat() if session.last_activity_at else None,
         "message_count": session.message_count or 0,
@@ -952,9 +927,11 @@ async def get_history(
     request: Request,
     page: int = 1,
     page_size: int = 25,
-    status_filter: str = None,
-    date_from: str = None,
-    date_to: str = None,
+    status_filter: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    country: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
@@ -982,14 +959,14 @@ async def get_history(
     duplicate_visitors = db.execute(duplicate_visitors_stmt).scalars().all()
     
     # Consolidate each visitor's sessions
-    consolidated_count = 0
+    total_consolidated = 0
     for visitor_uuid in duplicate_visitors:
         consolidated_session = consolidate_visitor_sessions(db, visitor_uuid, tenant_id, reactivate_closed=False)
         if consolidated_session:
-            consolidated_count += 1
+            total_consolidated += 1
     
-    if consolidated_count > 0:
-        logger.info(f"FETCH_HISTORY: Consolidated {consolidated_count} duplicate visitor sessions")
+    if total_consolidated > 0:
+        logger.info(f"FETCH_HISTORY: Consolidated {total_consolidated} duplicate visitor sessions")
     
     # Step 2: Get unique visitors with their most recent session
     # Use a window function approach instead of complex joins
@@ -1001,8 +978,11 @@ async def get_history(
         ChatSession.is_deleted == False
     ]
     
+    if country:
+        base_conditions.append(ChatSession.country == country)
+    
     # Status filter — handle both 'ALL' and 'all'
-    if status_filter and status_filter.upper() != 'ALL':
+    if status_filter and str(status_filter).upper() != 'ALL':
         if status_filter.lower() == 'active':
             base_conditions.append(ChatSession.session_status == 'active')
         elif status_filter.lower() == 'ended':
@@ -1045,7 +1025,7 @@ async def get_history(
                 unique_sessions[visitor_uuid] = session
     
     # Convert to list and sort by last_activity_at descending
-    sessions_list = list(unique_sessions.values())
+    sessions_list: List[Any] = list(unique_sessions.values())
     sessions_list.sort(key=lambda x: x.last_activity_at, reverse=True)
     
     total = len(sessions_list)
@@ -1054,7 +1034,7 @@ async def get_history(
     # Apply pagination
     start_idx = (page - 1) * page_size
     end_idx = start_idx + page_size
-    paginated_sessions = sessions_list[start_idx:end_idx]
+    paginated_sessions = sessions_list[start_idx:end_idx] if sessions_list else []
     
     logger.info(f"FETCH_HISTORY: Retrieved {len(paginated_sessions)} consolidated sessions")
     
@@ -1131,12 +1111,35 @@ async def update_lead(
     if "phone" in data: session.lead_phone = data["phone"]
     if "company" in data: session.lead_company = data["company"]
     
+    # If no Lead exists but we have basic info, create one
+    if not session.lead and (session.lead_email or session.lead_phone or data.get("email") or data.get("phone")):
+        from app.models.lead import Lead, LeadStatus
+        new_lead = Lead(
+            tenant_id=tenant_id,
+            name=data.get("name") or session.lead_name or "Unknown",
+            email=data.get("email") or session.lead_email or "unknown@example.com",
+            phone=data.get("phone") or session.lead_phone or "0000000000",
+            company=data.get("company") or session.lead_company,
+            session_id=session.session_id,
+            status=data.get("status") or LeadStatus.NEW.value
+        )
+        db.add(new_lead)
+        db.flush()
+        session.lead_id = new_lead.id
+        session.is_lead = True
+    
     # Also update the linked Lead record if it exists
     if session.lead:
         if "name" in data: session.lead.name = data["name"]
         if "email" in data: session.lead.email = data["email"]
         if "phone" in data: session.lead.phone = data["phone"]
         if "company" in data: session.lead.company = data["company"]
+        if "trade_type" in data: session.lead.trade_type = data["trade_type"]
+        if "country_interested" in data: session.lead.country_interested = data["country_interested"]
+        if "product" in data: session.lead.product = data["product"]
+        if "requirement_type" in data: session.lead.requirement_type = data["requirement_type"]
+        if "status" in data: session.lead.status = data["status"]
+        if "website" in data: session.lead.website = data["website"]
         session.is_lead = True
     
     session.updated_at = datetime.utcnow()

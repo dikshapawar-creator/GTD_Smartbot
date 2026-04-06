@@ -1,5 +1,6 @@
 
 import logging
+import json
 from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
@@ -166,15 +167,13 @@ async def submit_lead(
             chat_session.lead_score = int(profile_score * 4 + engagement_score * 3 + intent_score * 3) # Normalized to 100
             
             # 3.1 Insert Automated History Message (Persistent Form)
-            formal_msg = (
-                "🚨 **Enquiry Submission**\n\n"
-                "Thank you! We have received your details:\n"
-                f"👤 **Name**: {lead_req.full_name}\n"
-                f"🏢 **Company**: {lead_req.company_name or '-'}\n"
-                f"📧 **Email**: {lead_req.business_email}\n"
-                f"📞 **Phone**: {lead_req.contact_number}\n\n"
-                "Our team will contact you shortly to assist you further."
-            )
+            formal_msg = json.dumps({
+                "full_name": lead_req.full_name,
+                "company_name": lead_req.company_name or "-",
+                "business_email": lead_req.business_email,
+                "contact_number": lead_req.contact_number,
+                "status": "submitted"
+            })
             
             system_msg = ChatMessage(
                 session_id=chat_session.session_id,

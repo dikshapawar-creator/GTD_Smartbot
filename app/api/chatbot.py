@@ -13,6 +13,7 @@ from app.models.chat_message import ChatMessage
 from app.models.blocked import BlockedVisitor
 
 logger = logging.getLogger(__name__)
+from app.services.inactivity_service import send_inactivity_message
 from app.services.chatbot import ChatbotService
 from app.services import session_service, intent_service, greeting_handler, lead_service
 from app.core import utils
@@ -230,7 +231,6 @@ async def initialize_session(request: Request, response: Response, background_ta
 
 
 # ── 1. AGENT & SESSION GATES ──────────────────────────────────────────
-from app.services.inactivity_service import send_inactivity_message
 
 @router.post("/message", response_model=ChatMessageResponse)
 async def send_message(request: Request, msg_req: ChatMessageRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
@@ -484,7 +484,6 @@ async def send_message(request: Request, msg_req: ChatMessageRequest, background
         res_type = ResponseType.CTA if chatbot_response.get("type") == "CTA" else ResponseType.MESSAGE
         
         # ⏰ INACTIVITY MONITOR: Reset timer on every message
-        from app.services.inactivity_service import send_inactivity_message
         background_tasks.add_task(send_inactivity_message, str(active_session.visitor_uuid), active_session.last_activity_utc)
 
         return await broadcast_and_return(bot_msg, {

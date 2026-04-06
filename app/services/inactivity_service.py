@@ -103,13 +103,15 @@ async def send_inactivity_message(session_id: str, last_activity_timestamp: date
                 if inactivity_msg and '\x00' in inactivity_msg:
                     inactivity_msg = inactivity_msg.replace('\x00', '')
 
-                # Prevent double-nudging
-                last_msg = db.query(ChatMessage).filter(
-                    ChatMessage.session_id == chat_session.session_id
-                ).order_by(ChatMessage.created_at_utc.desc()).first()
-                if last_msg and last_msg.message_text and inactivity_msg and \
-                        last_msg.message_text.strip() == inactivity_msg.strip():
-                    logger.debug(f"Monitor: Nudge already sent for {session_id}.")
+                # Prevent double-nudging across the entire session (only send once)
+                previous_nudge = db.query(ChatMessage).filter(
+                    ChatMessage.session_id == chat_session.session_id,
+                    ChatMessage.sender_type == "bot",
+                    ChatMessage.message_text == inactivity_msg
+                ).first()
+                
+                if previous_nudge:
+                    logger.debug(f"Monitor: Nudge already sent once for {session_id}. Will not send again in this session.")
                     return
 
                 logger.info(f"Monitor: Sending nudge for {chat_session.session_id} (visitor_uuid: {chat_session.visitor_uuid})")

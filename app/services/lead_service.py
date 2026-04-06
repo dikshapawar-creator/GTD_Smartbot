@@ -20,6 +20,9 @@ ALLOWED_TRANSITIONS: dict = {
     "COMPLETE": ["IN_PROGRESS", "CLOSED"],
     "DEAD_LEAD": ["NEW", "IN_PROGRESS"],
     "WRONG_LEAD": ["NEW"],
+    "COLD": ["WARM", "HOT", "IN_PROGRESS", "DEAD_LEAD"],
+    "WARM": ["HOT", "COLD", "IN_PROGRESS", "QUALIFIED"],
+    "HOT": ["WARM", "COLD", "IN_PROGRESS", "QUALIFIED", "COMPLETE"]
 }
 
 
@@ -278,7 +281,11 @@ def get_filtered_leads(
     total = query.count()
 
     # Sorting
-    sort_attr = getattr(Lead, sort_by, Lead.created_at)
+    if not sort_by or not hasattr(Lead, sort_by):
+        sort_attr = Lead.created_at
+    else:
+        sort_attr = getattr(Lead, sort_by)
+
     if sort_order.lower() == "desc":
         query = query.order_by(sort_attr.desc())
     else:
