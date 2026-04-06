@@ -58,15 +58,18 @@ async def send_inactivity_message(session_id: str, last_activity_timestamp: date
 
             db = SessionLocal()
             try:
+                # Use either visitor_uuid or session_id to find the session
                 chat_session = db.query(ChatSession).filter(
-                    (ChatSession.visitor_uuid == session_id) | (ChatSession.session_id == session_id)
+                    (ChatSession.visitor_uuid == session_id) | (ChatSession.session_id == session_id),
+                    ChatSession.is_deleted == False
                 ).first()
 
                 if not chat_session:
+                    logger.error(f"Monitor: Session {session_id} not found in DB.")
                     return
 
                 # Allow nudge in both BOT and HUMAN mode
-                current_mode = (chat_session.conversation_mode or "").upper()
+                current_mode = (chat_session.current_mode or "").upper()
                 logger.debug(f"Monitor: Session {session_id} mode is {current_mode}. Proceeding with nudge check.")
 
                 # Final DB timestamp check — if DB has newer activity, reset and loop
@@ -94,8 +97,7 @@ async def send_inactivity_message(session_id: str, last_activity_timestamp: date
                 inactivity_msg = config.response_text if (config and config.response_text) else (
                     "We've received your message and will get back to you soon.\n\n"
                     "For more details, feel free to reach us anytime:\n"
-                    "💬- https://wa.me\n"
-                    "📞 WhatsApp: +91 8527376675\n\n"
+                    "[💬 Click to WhatsApp](https://wa.me/918527376675)\n\n"
                     "We'll be happy to assist you with complete support."
                 )
 
@@ -106,7 +108,7 @@ async def send_inactivity_message(session_id: str, last_activity_timestamp: date
                 # Prevent double-nudging across the entire session (only send once)
                 previous_nudge = db.query(ChatMessage).filter(
                     ChatMessage.session_id == chat_session.session_id,
-                    ChatMessage.sender_type == "bot",
+                    ChatMessage.message_type == "bot",
                     ChatMessage.message_text == inactivity_msg
                 ).first()
                 

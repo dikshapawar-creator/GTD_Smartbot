@@ -294,7 +294,7 @@ async def intervene_session(
             and_(
                 ChatSession.visitor_uuid == session_uuid,
                 ChatSession.tenant_id == tenant_id,
-                ChatSession.session_status.in_([SessionStatus.ACTIVE, SessionStatus.BOT])
+                ChatSession.is_deleted == False
             )
         )
         .order_by(ChatSession.last_activity_at.desc())
@@ -304,7 +304,7 @@ async def intervene_session(
     session = result.scalar_one_or_none()
     
     if not session:
-        raise HTTPException(status_code=404, detail="Active session not found")
+        raise HTTPException(status_code=404, detail="Session not found")
     
     # Update session for agent takeover
     session.current_mode = ConversationMode.HUMAN
@@ -478,7 +478,7 @@ async def close_session(
 ):
     """Close a chat session."""
     tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
-    # Find the most recent active session by visitor UUID
+    # Find the most recent active session by visitor UUID (any non-closed status)
     from sqlalchemy import select, and_
     stmt = (
         select(ChatSession)
@@ -486,7 +486,8 @@ async def close_session(
             and_(
                 ChatSession.visitor_uuid == session_uuid,
                 ChatSession.tenant_id == tenant_id,
-                ChatSession.session_status == SessionStatus.ACTIVE
+                ChatSession.session_status.in_([SessionStatus.ACTIVE, SessionStatus.BOT, SessionStatus.HUMAN, SessionStatus.WAITING]),
+                ChatSession.is_deleted == False
             )
 
         )
@@ -503,7 +504,7 @@ async def close_session(
     session.session_status = SessionStatus.CLOSED
     session.conversation_mode = ConversationMode.BOT
     session.current_mode = ConversationMode.BOT
-    # Clear assignment to allow bot takeover
+    # Clear assignment to allow bot takeover on next message
     session.assigned_agent_id = None
     session.assigned_agent_email = None
     session.assigned_agent_name = None
@@ -523,14 +524,26 @@ async def close_session(
     db.commit()
     db.refresh(session)
     
-    # Notify via WebSocket using existing infrastructure
+    # Notify CRM via WebSocket
     try:
         socket_manager = get_live_chat_socket()
         if socket_manager:
             await socket_manager.notify_session_updated(session, session.tenant_id)
     except Exception as e:
         print(f"WebSocket notification failed: {e}")
-        # Continue without WebSocket - REST API still works
+
+    # 🔴 Notify the CLIENT widget that this session was closed by agent
+    # This allows the widget to reset and accept new messages as a fresh session
+    try:
+        from app.services.websocket_manager import manager
+        await manager.send_to_client(session_uuid, {
+            "type": "CHAT_ENDED",
+            "reason": "agent_closed",
+            "message": "This conversation was closed by an agent. You can start a new chat anytime.",
+            "session_id": session_uuid
+        })
+    except Exception as e:
+        logger.warning(f"Failed to notify client of session close: {e}")
     
     return {"message": "Session closed successfully"}
 

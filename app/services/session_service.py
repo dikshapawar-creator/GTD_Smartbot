@@ -154,19 +154,20 @@ class SessionService:
     def get_active_sessions(self, tenant_id: int = None) -> List[ChatSession]:
         """
         Get all truly active sessions:
-        1. Marked ACTIVE in DB
+        1. Marked ACTIVE/BOT/WAITING/HUMAN in DB
         2. AND Not deleted
-        3. AND (Connected via WebSocket OR Active within the last hour)
+        3. AND (Connected via WebSocket OR Active within the last 24 hours)
         4. AND Deduplicated by visitor_uuid (only most recent)
         """
         from datetime import datetime, timedelta
         from app.services.websocket_manager import manager
         
-        stale_cutoff = datetime.utcnow() - timedelta(hours=1)
+        # 24h window — bot sessions must be visible even after client disconnects
+        stale_cutoff = datetime.utcnow() - timedelta(hours=24)
         
         # Base query
         query = self.db.query(ChatSession).filter(
-            ChatSession.session_status == SessionStatus.ACTIVE,
+            ChatSession.session_status.in_([SessionStatus.ACTIVE, SessionStatus.BOT, SessionStatus.WAITING, SessionStatus.HUMAN]),
             ChatSession.is_deleted == False
         )
         
