@@ -157,39 +157,86 @@ class SessionService:
         1. Marked ACTIVE/BOT/WAITING/HUMAN in DB
         2. AND Not deleted
         3. AND (Connected via WebSocket OR Active within the last 24 hours)
-        4. AND Deduplicated by visitor_uuid (only most recent)
+        4. AND Deduplicated by visitor_uuid (only most recent) using SQL for performance
         """
         from datetime import datetime, timedelta
-        from app.services.websocket_manager import manager
+        from sqlalchemy import func, and_, select, desc
         
         # 24h window — bot sessions must be visible even after client disconnects
         stale_cutoff = datetime.utcnow() - timedelta(hours=24)
         
-        # Base query
-        query = self.db.query(ChatSession).filter(
+        # 1. Base status conditions
+        conditions = [
             ChatSession.session_status.in_([SessionStatus.ACTIVE, SessionStatus.BOT, SessionStatus.WAITING, SessionStatus.HUMAN]),
             ChatSession.is_deleted == False
+        ]
+        if tenant_id:
+            conditions.append(ChatSession.tenant_id == tenant_id)
+
+        # 🚀 JUNK SUPPRESSION: Only show sessions with interaction OR brand new visitors
+        # Interaction = user message exists OR lead info present
+        from sqlalchemy import exists, or_
+        
+        has_user_message = exists().where(
+            and_(
+                ChatMessage.session_id == ChatSession.session_id,
+                ChatMessage.message_type == 'user'
+            )
         )
         
-        if tenant_id:
-            query = query.filter(ChatSession.tenant_id == tenant_id)
-            
-        sessions = query.order_by(ChatSession.last_activity_at.desc()).all()
+        has_lead_info = or_(
+            ChatSession.is_lead == True,
+            ChatSession.lead_email != None,
+            ChatSession.lead_phone != None
+        )
         
-        # Filter for online or recent activity AND deduplicate by visitor_uuid
-        seen_visitors = set()
+        # Grace period: Show bots born in the last 15 minutes even if no interaction (allows agents to see new traffic)
+        grace_period_cutoff = datetime.utcnow() - timedelta(minutes=15)
+        is_fresh = ChatSession.created_at >= grace_period_cutoff
+        
+        conditions.append(
+            or_(
+                has_user_message,
+                has_lead_info,
+                is_fresh
+            )
+        )
+
+        # 2. SQL Window Function for deduplication
+        # We find the latest session per visitor that matches the active criteria
+        inner_stmt = (
+            select(
+                ChatSession.id,
+                func.row_number().over(
+                    partition_by=ChatSession.visitor_uuid,
+                    order_by=desc(ChatSession.last_activity_at)
+                ).label('rn')
+            ).where(and_(*conditions))
+        ).subquery()
+
+        # 3. Filter for rn = 1 and fetch the full objects
+        # We also apply the activity cutoff here if they aren't online
+        # (WebSocket check is still done in Python because it's in-memory status)
+        
+        # Get candidate sessions
+        candidates = (
+            self.db.query(ChatSession)
+            .join(inner_stmt, ChatSession.id == inner_stmt.c.id)
+            .filter(inner_stmt.c.rn == 1)
+            .order_by(desc(ChatSession.last_activity_at))
+            .all()
+        )
+        
+        from app.services.websocket_manager import manager
+        
         filtered_sessions = []
-        
-        for s in sessions:
-            if s.visitor_uuid in seen_visitors:
-                continue
-                
+        for s in candidates:
+            # Check online status or recent activity
             is_online = manager.has_client(s.visitor_uuid)
             is_recent = s.last_activity_at >= stale_cutoff if s.last_activity_at else False
             
             if is_online or is_recent:
                 filtered_sessions.append(s)
-                seen_visitors.add(s.visitor_uuid)
                 
         return filtered_sessions
 

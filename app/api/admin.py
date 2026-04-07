@@ -88,7 +88,13 @@ def get_dashboard_stats(
 
     total_messages = db.query(func.count(ChatMessage.id)).join(
         ChatSession, ChatSession.session_id == ChatMessage.session_id
-    ).filter(ChatSession.tenant_id == tenant_id).scalar()
+    ).filter(ChatSession.tenant_id == tenant_id, ChatSession.is_deleted == False).scalar() or 0
+
+    bot_greetings = db.query(func.count(ChatSession.id)).filter(
+        ChatSession.tenant_id == tenant_id,
+        ChatSession.has_greeted == True,
+        ChatSession.is_deleted == False
+    ).scalar() or 0
 
     # 2. Recent Activities (Last 5 Leads)
     recent_leads = db.query(Lead).filter(
@@ -110,7 +116,8 @@ def get_dashboard_stats(
             "total_leads": total_leads,
             "new_leads": new_leads,
             "active_chats": active_chats,
-            "total_messages": total_messages
+            "total_messages": total_messages,
+            "bot_greetings": bot_greetings
         },
         "tenant_name": tenant_name,
         "notifications": [

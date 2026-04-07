@@ -496,10 +496,7 @@ async def websocket_chat(
                     continue
 
                 if role == "client":
-                    # 🔥 PERSISTENCE: Save user message
-                    _save_ws_message(db, session_id, text, "user", user_tenant_id)
-                    
-                    # ⏰ INACTIVITY: Monitor
+                    # ⏰ INACTIVITY: Monitor (Keep this here as it's just a trigger)
                     asyncio.create_task(send_inactivity_message(session_id, datetime.now(timezone.utc)))
                     
                     # 🔥 Broadcast user message to CRM Dashboard
@@ -542,6 +539,8 @@ async def websocket_chat(
                             )
 
                     if is_human_mode:
+                        # 🔥 PERSISTENCE: Save user message here for human mode
+                        _save_ws_message(db, session_id, text, "user", user_tenant_id)
                         logger.info(f"Relaying client message to agent for session {session_id} (HUMAN MODE)")
                         await manager.send_to_agent(session_id, {
                             "type": "message",

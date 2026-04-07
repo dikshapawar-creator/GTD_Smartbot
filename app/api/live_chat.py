@@ -1,6 +1,7 @@
 import logging
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
-from sqlalchemy import select, and_, or_, func, text
+from sqlalchemy import select, and_, or_, func, text, desc
+
 from app.core.tenant_resolver import TenantResolver
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
@@ -31,41 +32,35 @@ async def get_conversations(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
-    """Get all active conversations for the live chat dashboard."""
+    """Get all active conversations for the live chat dashboard with optimized loading."""
     tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
-    logger.info(f"📊 Fetching conversations for tenant {tenant_id} (user: {current_user.id}, super_admin: {getattr(current_user, 'is_super_admin', False)})")
+    logger.info(f"📊 Fetching conversations for tenant {tenant_id}")
     
-    # PROACTIVE CLEANUP: Consolidate any duplicate sessions before fetching
-    from sqlalchemy import select, func
-    
-    # Find all visitor UUIDs that have multiple active sessions
-    duplicate_visitors_stmt = (
-        select(ChatSession.visitor_uuid)
-        .where(
-            ChatSession.tenant_id == tenant_id,
-            ChatSession.session_status.in_([SessionStatus.ACTIVE, SessionStatus.BOT, SessionStatus.HUMAN]),
-            ChatSession.is_deleted == False
-        )
-        .group_by(ChatSession.visitor_uuid)
-        .having(func.count(ChatSession.id) > 1)
-    )
-    
-    duplicate_visitors = db.execute(duplicate_visitors_stmt).scalars().all()
-    
-    # Consolidate each visitor's sessions
-    for visitor_uuid in duplicate_visitors:
-        logger.info(f"🔧 Consolidating duplicate sessions for visitor {visitor_uuid}")
-        consolidate_visitor_sessions(db, visitor_uuid, tenant_id)
+    # We no longer do proactive cleanup here because it's too slow.
+    # get_active_sessions_sync now handles deduplication at the SQL level.
     
     sessions = get_active_sessions_sync(db, tenant_id=tenant_id)
     logger.info(f"📊 Found {len(sessions)} active sessions for tenant {tenant_id}")
     
-    # Convert to frontend format
-    conversations = []
-    from app.services.websocket_manager import manager
+    # 🚀 BATCH FETCH user_message_count to avoid N+1 query (Performance Fix)
+    session_ids = [s.session_id for s in sessions]
+    user_msg_counts = {}
+    if session_ids:
+        # We only count 'user' messages to match the dashboard filter logic
+        counts = db.execute(
+            select(ChatMessage.session_id, func.count(ChatMessage.id))
+            .where(
+                and_(
+                    ChatMessage.session_id.in_(session_ids),
+                    ChatMessage.message_type == 'user'
+                )
+            )
+            .group_by(ChatMessage.session_id)
+        ).all()
+        user_msg_counts = {sid: count for sid, count in counts}
     
-    for session in sessions:
-        conversations.append(format_session_for_crm(session))
+    # Convert to frontend format with pre-fetched counts
+    conversations = [format_session_for_crm(s, db=db, user_msg_count=user_msg_counts.get(s.session_id, 0)) for s in sessions]
     
     return conversations
 
@@ -164,6 +159,9 @@ async def get_messages(
         
     # CRITICAL FIX: Consolidate sessions for this visitor first, but do NOT reactivate if closed
     consolidated_session = consolidate_visitor_sessions(db, session.visitor_uuid, tenant_id, reactivate_closed=False)
+    
+    # Refresh session after potential consolidation
+    session = consolidated_session or session
     
     # Get messages for ALL sessions belonging to this visitor or lead
     # This unified view helps agents see the full context of returning visitors
@@ -716,8 +714,11 @@ def _get_lead_status(score: int) -> str:
         return "COLD"
 
 
-def format_session_for_crm(session: ChatSession) -> dict:
-    """Format a single session for CRM broadcast."""
+def format_session_for_crm(session: ChatSession, db: Session = None, user_msg_count: Optional[int] = None) -> dict:
+    """
+    Format a single session for CRM broadcast.
+    Accepts optional user_msg_count to avoid N+1 query loops.
+    """
     ip_meta = session.ip_metadata_dict
     from app.services.websocket_manager import manager
     
@@ -765,6 +766,13 @@ def format_session_for_crm(session: ChatSession) -> dict:
         "created_at_ist": format_ist_datetime(session.created_at),
         "last_message_ist": format_ist_datetime(session.last_activity_at),
         "lead_insights": session.lead_insights,
+        "user_message_count": user_msg_count if user_msg_count is not None else (
+            db.query(func.count(ChatMessage.id)).filter(
+                ChatMessage.session_id == session.session_id,
+                ChatMessage.message_type == 'user'
+            ).scalar() if db else 0
+        ),
+        "is_lead": session.is_lead or False,
         "server_time_utc": datetime.utcnow().isoformat(),
     }
 
@@ -845,7 +853,7 @@ def consolidate_visitor_sessions(db: Session, visitor_uuid: str, tenant_id: int,
     This prevents duplicate queue cards in the live chat dashboard.
     """
     from sqlalchemy import select
-    from datetime import datetime
+    from datetime import datetime, timezone
     
     # Look for ALL sessions for this visitor (including closed ones to consolidate properly)
     stmt = (
@@ -922,13 +930,14 @@ def consolidate_visitor_sessions(db: Session, visitor_uuid: str, tenant_id: int,
             logger.info(f"Merged lead information for visitor {visitor_uuid}: name={keep_session.lead_name}, email={keep_session.lead_email}")
         
         for duplicate in duplicate_sessions:
-            duplicate.session_status = SessionStatus.CLOSED
-            duplicate.current_mode = ConversationMode.BOT
-            duplicate.conversation_mode = ConversationMode.BOT
-            duplicate.is_locked = False
-            duplicate.agent_joined = False
-            duplicate.ended_at_utc = datetime.utcnow()
-            duplicate.ended_at_local = datetime.utcnow()
+            if duplicate.session_status != SessionStatus.CLOSED:
+                duplicate.session_status = SessionStatus.CLOSED
+                duplicate.current_mode = ConversationMode.BOT
+                duplicate.conversation_mode = ConversationMode.BOT
+                duplicate.is_locked = False
+                duplicate.agent_joined = False
+                duplicate.ended_at_utc = datetime.now(timezone.utc)
+                duplicate.ended_at_local = datetime.now(timezone.utc)
         
         db.commit()
     
@@ -948,44 +957,13 @@ async def get_history(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
-    """Get paginated conversation history with session consolidation by visitor."""
+    """Get paginated conversation history with optimized SQL-level deduplication."""
     tenant_id = TenantResolver.resolve_admin_tenant(db, request, current_user)
-    logger.info(f"FETCH_HISTORY: tenant_id={tenant_id}, status_filter={status_filter}, date_from={date_from}, date_to={date_to}")
+    logger.info(f"FETCH_HISTORY: tenant_id={tenant_id}, status_filter={status_filter}")
     
-    # CRITICAL FIX: Consolidate sessions by visitor_uuid first
-    # This prevents multiple sessions for the same visitor from appearing in history
-    
-    # Step 1: Proactively consolidate any duplicate sessions before querying
-    from sqlalchemy import func, and_, select, distinct
-    
-    # Find visitors with multiple sessions
-    duplicate_visitors_stmt = (
-        select(ChatSession.visitor_uuid)
-        .where(
-            ChatSession.tenant_id == tenant_id,
-            ChatSession.is_deleted == False
-        )
-        .group_by(ChatSession.visitor_uuid)
-        .having(func.count(ChatSession.id) > 1)
-    )
-    
-    duplicate_visitors = db.execute(duplicate_visitors_stmt).scalars().all()
-    
-    # Consolidate each visitor's sessions
-    total_consolidated = 0
-    for visitor_uuid in duplicate_visitors:
-        consolidated_session = consolidate_visitor_sessions(db, visitor_uuid, tenant_id, reactivate_closed=False)
-        if consolidated_session:
-            total_consolidated += 1
-    
-    if total_consolidated > 0:
-        logger.info(f"FETCH_HISTORY: Consolidated {total_consolidated} duplicate visitor sessions")
-    
-    # Step 2: Get unique visitors with their most recent session
-    # Use a window function approach instead of complex joins
-    from sqlalchemy import text
-    
-    # Build base conditions
+    from sqlalchemy import func, and_, select, desc
+
+    # 1. Build base query conditions
     base_conditions = [
         ChatSession.tenant_id == tenant_id,
         ChatSession.is_deleted == False
@@ -994,67 +972,114 @@ async def get_history(
     if country:
         base_conditions.append(ChatSession.country == country)
     
-    # Status filter — handle both 'ALL' and 'all'
+    if search:
+        search_term = f"%{search}%"
+        base_conditions.append(or_(
+            ChatSession.lead_name.ilike(search_term),
+            ChatSession.lead_email.ilike(search_term),
+            ChatSession.visitor_uuid.ilike(search_term),
+            ChatSession.initial_ip.ilike(search_term)
+        ))
+
+    # 🎯 GLOBAL INTERACTION FILTER:
+    # Exclude sessions where ONLY the bot greeted the client without actual interaction.
+    # We ALWAYS show sessions where an agent has joined / intervened.
+    user_msg_exists = select(1).where(
+        ChatMessage.session_id == ChatSession.session_id,
+        ChatMessage.message_type == 'user'
+    ).exists()
+    
+    base_conditions.append(
+        or_(
+            ChatSession.agent_joined_at != None,
+            user_msg_exists,
+            ChatSession.is_lead == True,
+            ChatSession.lead_id != None
+        )
+    )
+
+    # Status filter logic
     if status_filter and str(status_filter).upper() != 'ALL':
         if status_filter.lower() == 'active':
             base_conditions.append(ChatSession.session_status == 'active')
-        elif status_filter.lower() == 'ended':
-            base_conditions.append(ChatSession.session_status == 'ended')
+        elif status_filter.lower() in ['ended', 'closed']:
+            base_conditions.append(ChatSession.session_status.in_(['ended', 'closed', SessionStatus.CLOSED]))
+        elif status_filter == 'missed':
+            # Missed is now partially covered by global filter, but we still ensure agent_joined_at == None
+            base_conditions.append(ChatSession.agent_joined_at == None)
     
     # Date filters
     if date_from:
         try:
             date_from_dt = datetime.fromisoformat(date_from.replace('Z', '+00:00'))
             base_conditions.append(ChatSession.created_at >= date_from_dt)
-        except ValueError:
-            pass
+        except ValueError: pass
     
     if date_to:
         try:
             date_to_dt = datetime.fromisoformat(date_to.replace('Z', '+00:00'))
             base_conditions.append(ChatSession.created_at <= date_to_dt)
-        except ValueError:
-            pass
-    
-    # Get all sessions matching criteria, then deduplicate by visitor_uuid in Python
-    # This is simpler and more reliable than complex SQL joins
-    all_sessions_stmt = (
-        select(ChatSession)
-        .where(and_(*base_conditions))
-        .order_by(ChatSession.visitor_uuid, ChatSession.last_activity_at.desc())
+        except ValueError: pass
+
+    # 2. Optimized SQL: Use ROW_NUMBER() to identify the LATEST session per visitor_uuid
+    inner_stmt = (
+        select(
+            ChatSession.id,
+            ChatSession.session_id,
+            ChatSession.last_activity_at,
+            func.row_number().over(
+                partition_by=ChatSession.visitor_uuid,
+                order_by=desc(ChatSession.last_activity_at)
+            ).label('rn')
+        ).where(and_(*base_conditions))
+    ).subquery()
+
+    # 3. Get TOTAL count of unique visitors
+    total_stmt = select(func.count(inner_stmt.c.id)).where(inner_stmt.c.rn == 1)
+    total = db.execute(total_stmt).scalar() or 0
+
+    # 4. Fetch the data for the current page
+    paged_stmt = (
+        select(inner_stmt.c.id, inner_stmt.c.session_id)
+        .where(inner_stmt.c.rn == 1)
+        .order_by(desc(inner_stmt.c.last_activity_at))
+        .offset((page - 1) * page_size)
+        .limit(page_size)
     )
     
-    all_sessions = db.execute(all_sessions_stmt).scalars().all()
+    paged_rows = db.execute(paged_stmt).all()
+    page_ids = [row[0] for row in paged_rows]
+    page_session_ids = [row[1] for row in paged_rows]
     
-    # Deduplicate by visitor_uuid - keep only the most recent session per visitor
-    unique_sessions = {}
-    for session in all_sessions:
-        visitor_uuid = session.visitor_uuid
-        if visitor_uuid not in unique_sessions:
-            unique_sessions[visitor_uuid] = session
-        else:
-            # Keep the session with the most recent activity
-            if session.last_activity_at > unique_sessions[visitor_uuid].last_activity_at:
-                unique_sessions[visitor_uuid] = session
-    
-    # Convert to list and sort by last_activity_at descending
-    sessions_list: List[Any] = list(unique_sessions.values())
-    sessions_list.sort(key=lambda x: x.last_activity_at, reverse=True)
-    
-    total = len(sessions_list)
-    logger.info(f"FETCH_HISTORY: Total unique visitors found: {total}")
-    
-    # Apply pagination
-    start_idx = (page - 1) * page_size
-    end_idx = start_idx + page_size
-    paginated_sessions = sessions_list[start_idx:end_idx] if sessions_list else []
-    
-    logger.info(f"FETCH_HISTORY: Retrieved {len(paginated_sessions)} consolidated sessions")
-    
-    # Format sessions for frontend
-    items = []
-    for session in paginated_sessions:
-        items.append(format_session_for_crm(session))
+    if not page_ids:
+        return {"items": [], "total": total, "page": page, "page_size": page_size, "total_pages": 0}
+
+    # 5. Fetch full objects
+    final_sessions = (
+        db.query(ChatSession)
+        .filter(ChatSession.id.in_(page_ids))
+        .all()
+    )
+    # Sort to match original ranking
+    final_sessions.sort(key=lambda x: x.last_activity_at or x.created_at, reverse=True)
+
+    # 6. BATCH FETCH user_message_count for the page (N+1 FIX)
+    user_msg_counts = {}
+    if page_session_ids:
+        counts = db.execute(
+            select(ChatMessage.session_id, func.count(ChatMessage.id))
+            .where(
+                and_(
+                    ChatMessage.session_id.in_(page_session_ids),
+                    ChatMessage.message_type == 'user'
+                )
+            )
+            .group_by(ChatMessage.session_id)
+        ).all()
+        user_msg_counts = {sid: count for sid, count in counts}
+
+    # Format for frontend with pre-fetched counts
+    items = [format_session_for_crm(s, db=db, user_msg_count=user_msg_counts.get(s.session_id, 0)) for s in final_sessions]
     
     return {
         "items": items,
@@ -1094,7 +1119,7 @@ async def get_session_detail(
         raise HTTPException(status_code=404, detail=f"Session not found for UUID: {session_uuid}")
     
     logger.info(f"Found session: {session.session_id}, visitor_uuid: {session.visitor_uuid}")
-    return format_session_for_crm(session)
+    return format_session_for_crm(session, db=db)
 
 
 @router.post("/update-lead/{session_uuid}")

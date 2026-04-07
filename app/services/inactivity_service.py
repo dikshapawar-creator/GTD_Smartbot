@@ -106,10 +106,12 @@ async def send_inactivity_message(session_id: str, last_activity_timestamp: date
                     inactivity_msg = inactivity_msg.replace('\x00', '')
 
                 # Prevent double-nudging across the entire session (only send once)
+                # Enterprise Fix: Use fuzzy matching (LIKE) because exact string matching is fragile
+                # with dynamic IntentConfigs and special encoding/formatting.
                 previous_nudge = db.query(ChatMessage).filter(
                     ChatMessage.session_id == chat_session.session_id,
                     ChatMessage.message_type == "bot",
-                    ChatMessage.message_text == inactivity_msg
+                    ChatMessage.message_text.like("%back to you soon%")
                 ).first()
                 
                 if previous_nudge:
